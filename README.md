@@ -45,6 +45,17 @@ node scripts/import-v1.mjs https://redroom.zombiedawn.net/dame/whiteboard https:
 - `GET /api/words/theme?q=pirates` suggests words for a theme. It uses Datamuse (free, no key) and caches results for a day.
 - Words come from a shuffled deck per room, so no word repeats until the whole deck has been drawn.
 
+## Your own Redis server (no command limits)
+
+`scripts/setup-redis-debian.sh` sets up Redis on Debian 12:
+- TLS only on port 6380, with a Let's Encrypt certificate
+- an ACL user `wb` limited to `wb:*` keys and channels, with no dangerous commands
+- append-only persistence and no eviction
+
+Run `DOMAIN=redis.example.net EMAIL=you@example.com bash scripts/setup-redis-debian.sh`. It writes the `REDIS_URL` for Vercel to `/root/chaos-whiteboard-redis.txt`.
+
+To move existing data, run `FROM=<old url> TO=<new url> node scripts/copy-redis.mjs`. It copies every `wb:*` key by type, so it works across Redis versions.
+
 ## Local development
 
 ```bash
