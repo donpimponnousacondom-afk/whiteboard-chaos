@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ALPHABET, EMPTY, hexToRgb, normHex } from "@/lib/palette";
 import { applyOps, decodeDelta, READ_OPS, type Op } from "@/lib/raster";
 import { api, ApiError, getIdentity, nonce, setName as saveName } from "./client";
@@ -730,8 +730,34 @@ export default function Room({ roomId }: { roomId: string }) {
 
   const myName = name;
   const visibleLog = useMemo(() => log.filter((l) => showDraws || l.kind !== "draw"), [log, showDraws]);
-  const logEnd = useRef<HTMLDivElement>(null);
-  useEffect(() => { logEnd.current?.scrollIntoView({ block: "end" }); }, [visibleLog.length]);
+  // Chat scroll: follow new messages only while the reader is at the bottom.
+  // Scroll the log box itself (never scrollIntoView, which also moves the page),
+  // and key on the last message, not the count (the log is capped at 400).
+  const logBox = useRef<HTMLDivElement>(null);
+  const stick = useRef(true);
+  const [unread, setUnread] = useState(0);
+  const lastKey = visibleLog.length ? visibleLog[visibleLog.length - 1].key : "";
+  const toBottom = useCallback(() => {
+    const el = logBox.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    stick.current = true;
+    setUnread(0);
+  }, []);
+  const onLogScroll = () => {
+    const el = logBox.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+    stick.current = atBottom;
+    if (atBottom) setUnread(0);
+  };
+  useLayoutEffect(() => {
+    if (!lastKey) return;
+    if (stick.current) toBottom();
+    else setUnread((n) => n + 1);
+  }, [lastKey, toBottom]);
+  // jump to the newest message when the chat tab opens or the filter changes
+  useLayoutEffect(() => { toBottom(); }, [railTab, showDraws, toBottom]);
 
   if (error) {
     return (
@@ -880,7 +906,8 @@ export default function Room({ roomId }: { roomId: string }) {
               ))}
             </ul>
           ) : (
-            <div className="log" aria-live="polite">
+            <div className="log-wrap">
+            <div className="log" aria-live="polite" ref={logBox} onScroll={onLogScroll}>
               {visibleLog.length === 0 && <p className="empty">No messages yet. Say hi, or press Enter to start typing.</p>}
               {visibleLog.map((l) => (
                 <div key={l.key} className={`entry ${l.kind}`}>
@@ -888,7 +915,10 @@ export default function Room({ roomId }: { roomId: string }) {
                   <span className="text">{l.text}</span>
                 </div>
               ))}
-              <div ref={logEnd} />
+            </div>
+            {unread > 0 && (
+              <button className="jump" onClick={toBottom}>{unread === 1 ? "1 new message" : `${unread} new messages`}</button>
+            )}
             </div>
           )}
 
