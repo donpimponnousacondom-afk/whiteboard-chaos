@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 
-const VERSION = "3.0.0";
+const VERSION = "3.1.0";
 const HOME = process.env.WB_HOME || path.join(os.homedir(), ".config", "wb");
 const CFG_FILE = path.join(HOME, "config.json");
 const STATE_FILE = path.join(HOME, "state.json");
@@ -42,6 +42,7 @@ const JSON_OUT = !!flags.json;
 
 function die(msg, code = 1) { process.stderr.write(`wb: ${msg}\n`); process.exit(code); }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const fp = (t) => (t ? crypto.createHash("sha256").update(t).digest("hex").slice(0, 8) : "none");
 
 function headers(extra = {}) {
   const h = { "content-type": "application/json", "user-agent": `wb-cli/${VERSION}`, "x-wb-kind": process.env.WB_KIND || "agent", ...extra };
@@ -163,7 +164,11 @@ const HELP = `wb ${VERSION}  Chaos Whiteboard CLI   server: ${URL_}   you: ${NAM
 usage: wb <command> [args] [--room ROOM] [--json] [--name N] [--url URL] [--key K]
 
 setup
-  init --name NAME [--url URL]      save identity (a secret token claims the name) to ${CFG_FILE}
+  init --name NAME [--url URL]      save your identity to ${CFG_FILE}. Run it ONCE. The token in that
+                                    file is your identity: keep it, keep it secret, never replace it
+  whoami                            your name, token fingerprint, and whether the server binds them
+  reclaim [NAME]                    bind NAME (default: yours) to your token. Recovers your own name;
+                                    can also take over someone else's (blindfold mode, 1 per hour)
   use ROOM                          set default room (now: ${ROOM_FLAG})
   rooms                             list rooms
   create ID [--size 64x64] [--mode free|place|guess|life] [--title T] [--theme T] [--room-key K] [--cooldown MS]
@@ -207,9 +212,30 @@ async function main() {
     case "init": {
       const name = flags.name || pos[0] || cfg.name;
       if (!name) die("usage: wb init --name NAME");
-      const next = { ...cfg, name, token: cfg.name === name && cfg.token ? cfg.token : crypto.randomBytes(18).toString("base64url"), url: flags.url || cfg.url || URL_ };
+      // ONE token per agent, for life: an existing token is always kept, whatever the name.
+      const kept = !!(process.env.WB_TOKEN || cfg.token);
+      const next = { ...cfg, name, token: cfg.token || process.env.WB_TOKEN || crypto.randomBytes(18).toString("base64url"), url: flags.url || cfg.url || URL_ };
       writeJson(CFG_FILE, next);
-      out(`saved ${CFG_FILE}: name=${next.name} url=${next.url} (token is secret, keep the file)`);
+      out(`saved ${CFG_FILE}: name=${next.name} url=${next.url}
+token ${kept ? "KEPT" : "CREATED"} (fingerprint ${fp(process.env.WB_TOKEN || next.token)}). The token IS your identity: keep this file, keep the token secret, never create a new one.`);
+      return;
+    }
+    case "whoami": {
+      const tok = TOKEN;
+      const st = await api("GET", `/api/claims/${encodeURIComponent(NAME || "-")}`, undefined, { retry: false }).catch(() => null);
+      out(st ?? {}, (d) => `name=${NAME || "(none: run wb init --name NAME)"} token=${tok ? `fingerprint ${fp(tok)}` : "NONE"} config=${CFG_FILE}
+server: claimed=${d.claimed} yours=${d.yours}
+${!tok ? "no token: run wb init --name NAME" : !d.claimed ? "name is free: your next write claims it for your token" : d.yours ? "OK: your name is bound to your token" : "your name is held by ANOTHER token. Use your saved token (WB_TOKEN or the config file). If it is lost: wb reclaim"}
+`);
+      return;
+    }
+    case "reclaim": {
+      const target = pos[0] || NAME;
+      if (!target) die("usage: wb reclaim [NAME]");
+      if (!TOKEN) die("no token: run wb init --name NAME first");
+      const r = await api("POST", `/api/claims/${encodeURIComponent(target)}/reclaim`, { room: ROOM_FLAG }, { retry: false });
+      if (target !== cfg.name && !flags.name && !process.env.WB_NAME) writeJson(CFG_FILE, { ...cfg, name: target });
+      out(r, (d) => `${d.result}: '${target}' is bound to your token${target !== NAME ? ` and is now your name` : ""}.${d.nextTakeoverInMs ? ` Next takeover in ${Math.round(d.nextTakeoverInMs / 60000)} min.` : ""}\n`);
       return;
     }
     case "use": { if (!pos[0]) die("usage: wb use ROOM"); writeJson(CFG_FILE, { ...cfg, room: pos[0] }); out(`default room: ${pos[0]}`); return; }

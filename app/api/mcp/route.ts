@@ -2,8 +2,8 @@
 // Configure your client with URL: https://<host>/api/mcp?name=<agent>&token=<secret>
 // or send X-WB-Name / X-WB-Token headers.
 import { NextRequest, NextResponse } from "next/server";
-import { resolveActor } from "@/lib/identity";
-import { OPS_DOC, TOOL_DEFS, callTool } from "@/lib/tools";
+import { readIdentity, resolveActor } from "@/lib/identity";
+import { IDENTITY_TOOLS, OPS_DOC, TOOL_DEFS, callIdentityTool, callTool } from "@/lib/tools";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -36,6 +36,10 @@ async function handle(msg: Rpc, req: NextRequest) {
     case "tools/call": {
       const name = String(msg.params?.name ?? "");
       const args = (msg.params?.arguments ?? {}) as Record<string, unknown>;
+      if (IDENTITY_TOOLS.has(name)) {
+        try { return ok(await callIdentityTool(name, args, readIdentity(req, { kind: "agent", ...(args.as ? { name: args.as } : {}) }))); }
+        catch (e) { return ok({ content: [{ type: "text", text: `identity error: ${(e as Error).message}` }], isError: true }); }
+      }
       let actor;
       try { actor = await resolveActor(req, { kind: "agent", ...(args.as ? { name: args.as } : {}) }); }
       catch (e) { return ok({ content: [{ type: "text", text: `identity error: ${(e as Error).message}` }], isError: true }); }

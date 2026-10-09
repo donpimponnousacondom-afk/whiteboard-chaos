@@ -5,9 +5,10 @@ import { gameView } from "./game";
 import { HttpError } from "./http";
 import { DEFAULT_PALETTE } from "./palette";
 import { clampRegion, renderPng, renderText } from "./render";
-import { act, createRoom, getRoom, MODES, publicMeta } from "./rooms";
+import { act, commitEvent, createRoom, getRoom, MODES, publicMeta } from "./rooms";
 import { getStore } from "./store";
 import type { Actor } from "./types";
+import { claimStatus, reclaim, type RawIdentity } from "./identity";
 import { waitEvents } from "./wait";
 
 export const OPS_DOC = `Ops (coordinates are cells, x = column from left, y = row from top, origin top-left):
@@ -101,6 +102,16 @@ export const TOOL_DEFS = [
     input_schema: { type: "object", properties: { room: roomProp, action: { type: "string", enum: ["status", "start", "skip"] } }, required: ["room"] },
   },
   {
+    name: "wb_whoami",
+    description: "Show your identity: name, token fingerprint, and whether the server still binds your name to your token. Call it first if a write fails with name_taken.",
+    input_schema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "wb_reclaim",
+    description: "Bind a name to YOUR token. A free name is claimed at once. A name held by another token is taken over (blindfold mode: one takeover per token per hour). Use it to recover your own name if your token changed. Pass room to announce the takeover there (anonymously).",
+    input_schema: { type: "object", properties: { name: { type: "string", description: "default: your current name" }, room: roomProp }, additionalProperties: false },
+  },
+  {
     name: "wb_create_room",
     description: "Create a new room/canvas. Modes: free (anything goes), place (1 px per cooldown per player), guess (pictionary), life (Game of Life).",
     input_schema: {
@@ -122,6 +133,31 @@ type Content = { type: "text"; text: string } | { type: "image"; data: string; m
 export interface ToolResult { content: Content[]; isError?: boolean; structuredContent?: Record<string, unknown> }
 
 const txt = (text: string, structured?: Record<string, unknown>): ToolResult => ({ content: [{ type: "text", text }], ...(structured ? { structuredContent: structured } : {}) });
+
+// Tools that must work even when the caller's name is held by another token.
+export const IDENTITY_TOOLS = new Set(["wb_whoami", "wb_reclaim"]);
+
+export async function callIdentityTool(name: string, args: Record<string, unknown>, id: RawIdentity): Promise<ToolResult> {
+  try {
+    if (name === "wb_whoami") {
+      const st = await claimStatus(id.name, id.token);
+      const verdict = !id.token ? "you send no token: your name is not protected and you cannot claim it"
+        : !st.claimed ? "your name is free: your next write claims it for your token"
+        : st.yours ? "your name is bound to your token: all good"
+        : "your name is held by ANOTHER token: use the token you saved, or wb_reclaim";
+      return txt(`name=${id.name} token_fingerprint=${st.fingerprint ?? "none"} claimed=${st.claimed} yours=${st.yours}\n${verdict}\nclaims expire after ${st.claimTtlHours} h without activity. Keep your token secret and never replace it.`, st as unknown as Record<string, unknown>);
+    }
+    const target = String(args.name ?? id.name);
+    const r = await reclaim(target, id.token, id.ip);
+    if (r.result === "taken_over" && typeof args.room === "string" && args.room) {
+      try { const meta = await getRoom(args.room); await commitEvent(meta, null, { kind: "system", text: `someone in a blindfold took over the name '${target}'` }); } catch { /* best effort */ }
+    }
+    return txt(`${r.result}: '${target}' is now bound to your token.${r.nextTakeoverInMs ? ` Next takeover allowed in ${Math.round(r.nextTakeoverInMs / 60000)} min.` : ""}${target !== id.name ? ` Use name '${target}' in your next calls.` : ""}`, r as unknown as Record<string, unknown>);
+  } catch (e) {
+    if (e instanceof HttpError) return { content: [{ type: "text", text: `error ${e.status} ${e.code}: ${e.message}` }], isError: true };
+    throw e;
+  }
+}
 
 export async function callTool(name: string, args: Record<string, unknown>, actor: Actor, signal?: AbortSignal): Promise<ToolResult> {
   try {

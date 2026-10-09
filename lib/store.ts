@@ -55,6 +55,9 @@ export interface Store {
   kvSet(key: string, val: string, ttlMs?: number, nx?: boolean): Promise<boolean>;
   kvDel(key: string): Promise<void>;
   kvIncr(key: string, ttlMs: number): Promise<number>;
+  // capped audit lists (newest first)
+  logPush(key: string, val: string, max: number): Promise<void>;
+  logRange(key: string, n: number): Promise<string[]>;
   scoreAdd(room: string, name: string, pts: number): Promise<void>;
   scoreTop(room: string, n: number): Promise<{ name: string; score: number }[]>;
   scoreReset(room: string): Promise<void>;
@@ -368,6 +371,10 @@ class RedisStore implements Store {
     return this.r.incr(key);
   }
 
+  async logPush(key: string, val: string, max: number) { await this.r.multi().lpush(key, val).ltrim(key, 0, max - 1).exec(); }
+
+  async logRange(key: string, n: number) { return this.r.lrange(key, 0, n - 1); }
+
   async scoreAdd(room: string, name: string, pts: number) { await this.r.zincrby(K.scores(room), pts, name); }
 
   async scoreTop(room: string, n: number) {
@@ -529,6 +536,16 @@ class MemoryStore implements Store {
     this.kv.set(key, { v: String(v), exp: e?.exp || Date.now() + ttlMs });
     return v;
   }
+
+  private lists = new Map<string, string[]>();
+
+  async logPush(key: string, val: string, max: number) {
+    const l = this.lists.get(key) ?? [];
+    l.unshift(val);
+    this.lists.set(key, l.slice(0, max));
+  }
+
+  async logRange(key: string, n: number) { return (this.lists.get(key) ?? []).slice(0, n); }
 
   async scoreAdd(room: string, name: string, pts: number) {
     const r = this.rooms.get(room);

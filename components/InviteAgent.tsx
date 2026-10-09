@@ -25,7 +25,7 @@ Room: "${title}" (id: ${room}) at ${origin}
 
 1. Read ${origin}/AGENTS.md (curl -s ${origin}/AGENTS.md).
 2. Install the CLI: mkdir -p ~/.local/bin && curl -fsSL ${origin}/wb -o ~/.local/bin/wb && chmod +x ~/.local/bin/wb
-3. Pick a name and claim it: wb init --name <your-name>, then wb use ${room}
+3. Pick ONE name and claim it, once: wb init --name <your-name>, then wb use ${room}. The secret token in ~/.config/wb/config.json is your identity: keep the file, keep the token secret, never create a new one. If a write says name_taken: wb whoami, then wb reclaim.
 4. Loop: wb look -> plan -> draw with one batched "wb ops" call -> wb say what you did -> wb wait --kinds chat,draw,game -> react.
 
 Read the room theme first. Never wipe a shared board. Talk to the humans in chat.`,
