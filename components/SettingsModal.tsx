@@ -19,6 +19,7 @@ export default function SettingsModal({ roomId, mode, title, theme, onClose, fla
   const [owner, setOwner] = useState(false);
   const [hasOwnerKey, setHasOwnerKey] = useState(true);
   const [keyInput, setKeyInput] = useState("");
+  const [keyOpen, setKeyOpen] = useState(false);
   const [bag, setBag] = useState<BagValue>(DEFAULT_BAG);
   const [meta, setMeta] = useState({ title, theme });
   const [saving, setSaving] = useState(false);
@@ -37,8 +38,29 @@ export default function SettingsModal({ roomId, mode, title, theme, onClose, fla
     if (!k) return;
     if (k.startsWith("own_")) saveOwnerKey(roomId, k); else saveAdminKey(k);
     setKeyInput("");
+    const r = await api<{ youAreOwner: boolean }>(`/api/rooms/${roomId}/settings`, { headers: ownerHeaders(roomId) });
+    if (!r.youAreOwner) {
+      if (k.startsWith("own_")) saveOwnerKey(roomId, ""); else saveAdminKey("");
+      flash(k.startsWith("own_") ? "That owner key does not belong to this room." : "That admin key is wrong.", "bad");
+      return;
+    }
+    flash(k.startsWith("own_") ? "Owner key accepted." : "Admin key accepted. It works in every room on this browser.");
+    setKeyOpen(false);
     await load();
   };
+  // only the admin key: the owner key is the room's only way in, so it stays
+  const forgetAdmin = async () => {
+    saveAdminKey("");
+    flash("Admin key removed from this browser.");
+    await load();
+  };
+  const keyRow = (
+    <div className="theme-row">
+      <input type="password" value={keyInput} onChange={(e) => setKeyInput(e.target.value)} placeholder="own_... owner key, or the admin key" autoComplete="off"
+        onKeyDown={(e) => e.key === "Enter" && unlockKey()} aria-label="Owner key or admin key" />
+      <button className="btn" onClick={unlockKey}>Unlock</button>
+    </div>
+  );
 
   const save = async () => {
     if (!s) return;
@@ -70,10 +92,7 @@ export default function SettingsModal({ roomId, mode, title, theme, onClose, fla
             {!owner && (
               <div className="owner-gate">
                 <p className="note">{hasOwnerKey ? "Only the room owner can change these. Paste the owner key you got when you created the room, or the server admin key." : "This built-in room is run by the server admin. Paste the admin key (WB_ADMIN_KEY) to change it."}</p>
-                <div className="theme-row">
-                  <input type="password" value={keyInput} onChange={(e) => setKeyInput(e.target.value)} placeholder="own_... or admin key" onKeyDown={(e) => e.key === "Enter" && unlockKey()} />
-                  <button className="btn" onClick={unlockKey}>Unlock</button>
-                </div>
+                {keyRow}
               </div>
             )}
             <div className="settings-grid">
@@ -104,6 +123,13 @@ export default function SettingsModal({ roomId, mode, title, theme, onClose, fla
             )}
             {owner && ok && <p className="note">Your owner key is saved in this browser. Keep a copy somewhere safe: <code>{ok}</code></p>}
             {owner && !ok && adminKey() && <p className="note">You are using the admin key.</p>}
+            {owner && (
+              <div className="key-tools">
+                <button type="button" className="linkish" onClick={() => setKeyOpen((v) => !v)} aria-expanded={keyOpen}>{keyOpen ? "Hide key box" : adminKey() ? "Use another key" : "Use the admin key"}</button>
+                {adminKey() && <button type="button" className="linkish danger" onClick={forgetAdmin}>Forget the admin key</button>}
+                {keyOpen && keyRow}
+              </div>
+            )}
             <div className="modal-foot">
               <button className="btn ghost" onClick={onClose}>Cancel</button>
               <button className="btn hot" onClick={save} disabled={!owner || saving}>{saving ? "Saving" : "Save settings"}</button>

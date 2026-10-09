@@ -7,16 +7,17 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 
-const VERSION = "3.2.0";
+const VERSION = "3.3.0";
 const HOME = process.env.WB_HOME || path.join(os.homedir(), ".config", "wb");
 const CFG_FILE = path.join(HOME, "config.json");
 const STATE_FILE = path.join(HOME, "state.json");
+const OWNERS_FILE = path.join(HOME, "owners.json"); // room -> owner key (from wb create)
 
 const readJson = (f, d) => { try { return JSON.parse(fs.readFileSync(f, "utf8")); } catch { return d; } };
 const writeJson = (f, v) => { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, JSON.stringify(v, null, 2) + "\n", { mode: 0o600 }); };
 
 // ---------- args ----------
-const BOOL = new Set(["json", "outline", "cursors", "no-retry", "help", "grid", "transparent", "quiet", "snapshot"]);
+const BOOL = new Set(["json", "outline", "cursors", "no-retry", "help", "grid", "transparent", "quiet", "snapshot", "custom-only", "all-words"]);
 const argv = process.argv.slice(2);
 const flags = {};
 const pos = [];
@@ -52,11 +53,11 @@ function headers(extra = {}) {
   return h;
 }
 
-async function api(method, p, body, { raw = false, retry = !flags["no-retry"] } = {}) {
+async function api(method, p, body, { raw = false, retry = !flags["no-retry"], extra = {} } = {}) {
   for (let attempt = 0; ; attempt++) {
     let res;
     try {
-      res = await fetch(URL_ + p, { method, headers: headers(), body: body === undefined ? undefined : JSON.stringify(body) });
+      res = await fetch(URL_ + p, { method, headers: headers(extra), body: body === undefined ? undefined : JSON.stringify(body) });
     } catch (e) {
       if (attempt < 3) { await sleep(500 * (attempt + 1)); continue; }
       die(`network error talking to ${URL_}: ${e.message}`);
@@ -80,6 +81,38 @@ async function api(method, p, body, { raw = false, retry = !flags["no-retry"] } 
 }
 
 const state = readJson(STATE_FILE, { seq: {} });
+const owners = readJson(OWNERS_FILE, {});
+const saveOwner = (room, key) => { owners[room] = key; writeJson(OWNERS_FILE, owners); };
+// Owner key for a room: --owner, WB_OWNER_KEY, or the one saved by "wb create". Admin key: WB_ADMIN_KEY.
+function ownerHeaders(room) {
+  const h = {};
+  const k = flags.owner || process.env.WB_OWNER_KEY || owners[room];
+  if (k) h["x-wb-owner"] = k;
+  if (process.env.WB_ADMIN_KEY) h["x-wb-admin"] = process.env.WB_ADMIN_KEY;
+  return h;
+}
+// Words from positional args ("a, b, c" or a b c), --file F, or "-" for stdin.
+function readWords(args) {
+  let text = args.join("\n");
+  if (flags.file) text += "\n" + fs.readFileSync(String(flags.file), "utf8");
+  if (args[0] === "-") text = fs.readFileSync(0, "utf8");
+  return text.split(/[\n,;]+/).map((w) => w.trim()).filter(Boolean);
+}
+// Game settings from flags, for create and "settings set".
+function gameFlags() {
+  const g = {};
+  if (flags.choices) g.choices = n(flags.choices, "choices");
+  if (flags.round) g.roundSec = n(flags.round, "round");
+  if (flags.difficulty) g.difficulty = String(flags.difficulty);
+  if (flags.categories) g.categories = String(flags.categories).split(",").map((c) => c.trim()).filter(Boolean);
+  if (flags["custom-only"]) g.customOnly = true;
+  if (flags.words || flags["words-file"]) {
+    let text = flags.words ? String(flags.words) : "";
+    if (flags["words-file"]) text += "\n" + fs.readFileSync(String(flags["words-file"]), "utf8");
+    g.custom = text.split(/[\n,;]+/).map((w) => w.trim()).filter(Boolean);
+  }
+  return g;
+}
 const saveSeq = (room, seq) => { state.seq[room] = seq; writeJson(STATE_FILE, state); };
 
 function out(data, textFn) {
@@ -172,7 +205,20 @@ setup
   use ROOM                          set default room (now: ${ROOM_FLAG})
   rooms                             list rooms
   create ID [--size 64x64] [--mode free|place|guess|life] [--title T] [--theme T] [--room-key K] [--cooldown MS]
+         pictionary: [--words "a, b, c"] [--words-file F] [--custom-only] [--choices 1|3|5] [--round S]
+                     [--difficulty easy|medium|hard|mixed] [--categories animals,food]
+                                    the owner key is saved to ${OWNERS_FILE}
   info                              room meta + palette (json)
+
+own the room (needs the owner key: saved by create, or wb owner ROOM KEY)
+  words [list]                      your room's own pictionary words (hidden from players)
+  words add "a, b, c" | --file F | -     add words (one per line or comma separated)
+  words remove "a, b"               remove words
+  words set "a, b, c" [--custom-only]    replace the list
+  words theme TOPIC [--max 40]      fetch related words from the server and add them
+  settings [show]                   room settings (slowmode, guess limit, word bag)
+  settings set [JSON] [--chat-slow S] [--guess-slow S] [--max-guesses N] [--choices N] [--round S] ...
+  owner ROOM KEY                    save an owner key you got from someone else
 
 see
   look [--region x,y,w,h]           text grid, one char per cell ('.' empty), legend included
@@ -201,7 +247,7 @@ talk / play
 realtime
   wait [--since SEQ] [--timeout S] [--kinds draw,chat,game]   block until something happens; remembers seq
   watch [--json] [--cursors] [--since SEQ]                    live stream (SSE), auto-reconnect
-env: WB_URL WB_NAME WB_TOKEN WB_ROOM WB_KEY WB_HOME WB_KIND
+env: WB_URL WB_NAME WB_TOKEN WB_ROOM WB_KEY WB_HOME WB_KIND WB_OWNER_KEY WB_ADMIN_KEY
 `;
 
 async function main() {
@@ -249,8 +295,74 @@ ${!tok ? "no token: run wb init --name NAME" : !d.claimed ? "name is free: your 
       const id = pos[0];
       const body = { id, mode: flags.mode, title: flags.title, theme: flags.theme, key: flags["room-key"], cooldownMs: flags.cooldown ? Number(flags.cooldown) : undefined };
       if (flags.size) { const [w, h] = String(flags.size).split("x").map(Number); body.w = w; body.h = h || w; }
+      const g = gameFlags();
+      if (Object.keys(g).length) body.game = g;
       const r = await api("POST", "/api/rooms", body);
-      out(r, (d) => `created ${d.room.id} ${d.room.w}x${d.room.h} mode=${d.room.mode}\n`);
+      if (r.ownerKey) saveOwner(r.room.id, r.ownerKey);
+      out(r, (d) => `created ${d.room.id} ${d.room.w}x${d.room.h} mode=${d.room.mode}${d.room.mode === "guess" ? ` own words=${g.custom ? g.custom.length : 0}` : ""}
+owner key saved to ${OWNERS_FILE} (keep that file: it is the only way to change this room's settings)
+`);
+      return;
+    }
+    case "owner": {
+      // wb owner ROOM KEY: save an owner key you got somewhere else (for example from a human)
+      if (!pos[0] || !pos[1]) die("usage: wb owner ROOM OWNER_KEY");
+      saveOwner(pos[0], pos[1]);
+      out(`owner key for ${pos[0]} saved to ${OWNERS_FILE}`);
+      return;
+    }
+    case "settings": {
+      const sub = pos[0] || "show";
+      if (sub === "show") {
+        const r = await api("GET", `/api/rooms/${room}/settings`, undefined, { extra: ownerHeaders(room) });
+        out(r, (d) => `${JSON.stringify(d.settings, null, 2)}\n${d.youAreOwner ? "you are the owner" : "read-only (no owner key for this room)"}\n`);
+        return;
+      }
+      if (sub !== "set") die("usage: wb settings [show] | wb settings set [JSON] [--chat-slow S] [--guess-slow S] [--max-guesses N] [--choices 1|3|5] [--round S] [--difficulty D] [--categories a,b] [--custom-only]");
+      const patch = pos[1] ? JSON.parse(pos[1]) : {};
+      if (flags["chat-slow"] !== undefined) patch.chatSlowSec = n(flags["chat-slow"], "chat-slow");
+      if (flags["guess-slow"] !== undefined) patch.guessSlowSec = n(flags["guess-slow"], "guess-slow");
+      if (flags["max-guesses"] !== undefined) patch.maxGuessesPerRound = n(flags["max-guesses"], "max-guesses");
+      if (flags.title) patch.title = String(flags.title);
+      if (flags.theme) patch.theme = String(flags.theme);
+      const g = gameFlags();
+      if (Object.keys(g).length) patch.game = { ...(patch.game || {}), ...g };
+      const r = await api("PATCH", `/api/rooms/${room}/settings`, patch, { extra: ownerHeaders(room), retry: false });
+      out(r, (d) => `saved. own words=${d.settings.game.custom.length} customOnly=${d.settings.game.customOnly} choices=${d.settings.game.choices} roundSec=${d.settings.game.roundSec}\n`);
+      return;
+    }
+    case "words": {
+      // the room's own pictionary words. Owner only (wb create saves the key).
+      const sub = pos.shift() || "list";
+      const patchWords = async (game) => {
+        const r = await api("PATCH", `/api/rooms/${room}/settings`, { game }, { extra: ownerHeaders(room), retry: false });
+        return r.settings.game;
+      };
+      if (sub === "list") {
+        const r = await api("GET", `/api/rooms/${room}/settings`, undefined, { extra: ownerHeaders(room) });
+        if (!r.youAreOwner) die(`no owner key for ${room}: only the owner sees the words (wb owner ${room} KEY)`, 2);
+        out(r.settings.game.custom, (w) => `${w.length} words${r.settings.game.customOnly ? " (custom only)" : ""}\n${w.join(", ")}\n`);
+        return;
+      }
+      if (sub === "add" || sub === "remove" || sub === "set") {
+        const words = readWords(pos);
+        if (!words.length) die(`usage: wb words ${sub} "a, b, c" | --file F | -`);
+        const key = sub === "add" ? "addWords" : sub === "remove" ? "removeWords" : "custom";
+        const g = await patchWords({ [key]: words, ...(flags["custom-only"] ? { customOnly: true } : {}) });
+        out(g, (d) => `${sub === "add" ? "added" : sub === "remove" ? "removed" : "set"}: the room has ${d.custom.length} own words\n`);
+        return;
+      }
+      if (sub === "theme") {
+        // related words from the server's theme fetch (Datamuse), then add them
+        const q = pos.join(" ");
+        if (!q) die("usage: wb words theme TOPIC [--max 40]");
+        const t = await api("GET", `/api/words/theme?q=${encodeURIComponent(q)}&max=${flags.max || 40}`);
+        if (!t.words.length) die(`no words found for "${q}"`);
+        const g = await patchWords({ addWords: t.words });
+        out({ added: t.words, total: g.custom.length }, () => `added ${t.words.length}: ${t.words.join(", ")}\nthe room has ${g.custom.length} own words\n`);
+        return;
+      }
+      die("usage: wb words [list] | add WORDS | remove WORDS | set WORDS | theme TOPIC");
       return;
     }
     case "info": { const r = await api("GET", `/api/rooms/${room}`); delete r.board; out(JSON.stringify(r, null, 2)); return; }

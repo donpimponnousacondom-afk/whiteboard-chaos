@@ -1,7 +1,9 @@
 "use client";
 // Word bag editor for pictionary rooms: built-in categories + difficulty, the
-// room's own words, and a theme fetch (Datamuse) that adds related words.
+// room's own words, a theme fetch (Datamuse) and an AI word maker (OpenRouter,
+// with the user's own key, from the browser).
 import { useState } from "react";
+import AiWords from "./AiWords";
 import { api } from "./client";
 
 export interface BagValue {
@@ -24,8 +26,17 @@ export default function WordBag({ value, onChange }: { value: BagValue; onChange
   const [theme, setTheme] = useState("");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  const [ai, setAi] = useState(false);
   const set = (p: Partial<BagValue>) => onChange({ ...value, ...p });
-  const count = value.custom.split(/[\n,;]+/).map((w) => w.trim()).filter(Boolean).length;
+  const list = () => [...new Set(value.custom.split(/[\n,;]+/).map((w) => w.trim().toLowerCase()).filter(Boolean))];
+  const count = list().length;
+  const addWords = (words: string[]) => {
+    const have = list();
+    const seen = new Set(have);
+    const add = words.filter((w) => !seen.has(w));
+    set({ custom: [...have, ...add].join(", ") });
+    setNote(`Added ${add.length} AI words. Remove any that are hard to draw.`);
+  };
 
   const fetchTheme = async () => {
     const q = theme.trim();
@@ -33,7 +44,7 @@ export default function WordBag({ value, onChange }: { value: BagValue; onChange
     setBusy(true); setNote(null);
     try {
       const r = await api<{ words: string[] }>(`/api/words/theme?q=${encodeURIComponent(q)}&max=40`);
-      const have = new Set(value.custom.split(/[\n,;]+/).map((w) => w.trim().toLowerCase()).filter(Boolean));
+      const have = new Set(list());
       const add = r.words.filter((w) => !have.has(w));
       set({ custom: [...have, ...add].join(", ") });
       setNote(`Added ${add.length} words for "${q}". Remove any that are hard to draw.`);
@@ -74,12 +85,14 @@ export default function WordBag({ value, onChange }: { value: BagValue; onChange
         <div className="theme-row">
           <input value={theme} onChange={(e) => setTheme(e.target.value)} placeholder="Theme, for example pirates, kitchen, space"
             onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); fetchTheme(); } }} />
-          <button type="button" className="btn" onClick={fetchTheme} disabled={busy}>{busy ? "Fetching" : "Fetch words"}</button>
+          <button type="button" className="btn" onClick={fetchTheme} disabled={busy} title="Related words from a free dictionary service">{busy ? "Fetching" : "Fetch words"}</button>
+          <button type="button" className="btn ai" onClick={() => setAi(true)} title="Make words with an AI model (your OpenRouter key)">AI words</button>
         </div>
         <textarea value={value.custom} onChange={(e) => set({ custom: e.target.value })} rows={4} placeholder="treasure, parrot, pirate ship, cannon" spellCheck={false} />
         {note && <p className="help">{note}</p>}
         <label className="check"><input type="checkbox" checked={value.customOnly} onChange={(e) => set({ customOnly: e.target.checked })} /> Only use my words (needs at least 5)</label>
       </fieldset>
+      <AiWords open={ai} onClose={() => setAi(false)} theme={theme} difficulty={value.difficulty} have={list()} onAdd={addWords} />
     </div>
   );
 }

@@ -5,11 +5,29 @@ import { gameView } from "./game";
 import { HttpError } from "./http";
 import { DEFAULT_PALETTE } from "./palette";
 import { clampRegion, renderPng, renderText } from "./render";
-import { act, commitEvent, createRoom, getRoom, MODES, publicMeta } from "./rooms";
+import { act, commitEvent, createRoom, getRoom, isOwner, MODES, publicMeta, publicSettings, updateSettings } from "./rooms";
+import { roomSettings } from "./settings";
+import { CATEGORIES } from "./words";
 import { getStore } from "./store";
 import type { Actor } from "./types";
 import { claimStatus, reclaim, type RawIdentity } from "./identity";
 import { waitEvents } from "./wait";
+
+// Pictionary word bag, shared by wb_create_room and wb_room_settings.
+const GAME_SCHEMA = {
+  type: "object",
+  description: "pictionary (mode=guess) word bag. Words: lowercase, 1..3 words, letters/spaces/hyphens, concrete and drawable. Max 1000 own words.",
+  properties: {
+    custom: { type: "array", items: { type: "string" }, description: "your own words (replaces the list); hidden from players" },
+    addWords: { type: "array", items: { type: "string" }, description: "append words to the list" },
+    removeWords: { type: "array", items: { type: "string" }, description: "remove words from the list" },
+    customOnly: { type: "boolean", description: "draw only from your words (needs at least 5)" },
+    choices: { type: "integer", enum: [1, 3, 5], description: "words offered to the drawer" },
+    roundSec: { type: "integer", minimum: 30, maximum: 600 },
+    difficulty: { type: "string", enum: ["easy", "medium", "hard", "mixed"] },
+    categories: { type: "array", items: { type: "string", enum: CATEGORIES }, description: "built-in categories; empty = all" },
+  },
+} as const;
 
 export const OPS_DOC = `Ops (coordinates are cells, x = column from left, y = row from top, origin top-left):
   {op:"px", x, y, c}                         one pixel
@@ -114,7 +132,7 @@ export const TOOL_DEFS = [
   },
   {
     name: "wb_create_room",
-    description: "Create a new room/canvas. Modes: free (anything goes), place (1 px per cooldown per player), guess (pictionary), life (Game of Life).",
+    description: "Create a new room/canvas. Modes: free (anything goes), place (1 px per cooldown per player), guess (pictionary), life (Game of Life). For pictionary, pass game.custom with your own word bag. Returns an owner key ONCE: save it to disk, you need it for wb_room_settings.",
     input_schema: {
       type: "object",
       properties: {
@@ -125,7 +143,26 @@ export const TOOL_DEFS = [
         palette: { type: "array", items: { type: "string" }, description: "custom palette of #rrggbb (max 62)" },
         cooldownMs: { type: "integer", description: "place mode cooldown" },
         key: { type: "string", description: "optional write key; only holders can draw" },
+        game: GAME_SCHEMA,
       },
+    },
+  },
+  {
+    name: "wb_room_settings",
+    description: "Read or change a room's settings: word bag (your own pictionary words), slowmode, guess limit, title, theme. get works for everyone (custom words stay hidden unless you pass ownerKey). set needs ownerKey: the key wb_create_room returned (or the server admin key). To add words without resending the list use game.addWords; to drop some use game.removeWords.",
+    input_schema: {
+      type: "object",
+      properties: {
+        room: roomProp,
+        action: { type: "string", enum: ["get", "set"], description: "default get" },
+        ownerKey: { type: "string", description: "owner key from room creation (own_...), or the admin key" },
+        game: GAME_SCHEMA,
+        chatSlowSec: { description: "seconds between chat messages: a number for everyone, or {human, agent}" },
+        guessSlowSec: { description: "seconds between guesses: a number for everyone, or {human, agent}" },
+        maxGuessesPerRound: { type: "integer", minimum: 0, maximum: 1000, description: "0 = no limit" },
+        title: { type: "string" }, theme: { type: "string" },
+      },
+      required: ["room"],
     },
   },
 ];
@@ -233,7 +270,22 @@ async function dispatch(name: string, a: Record<string, unknown>, actor: Actor, 
     }
     case "wb_create_room": {
       const { ownerKey, ...meta } = await createRoom(a, actor);
-      return txt(`created room ${meta.id} ${meta.w}x${meta.h} mode=${meta.mode}. Owner key (shown once, keep it secret, needed to change settings): ${ownerKey}`, { ...publicMeta(meta), ownerKey });
+      return txt(`created room ${meta.id} ${meta.w}x${meta.h} mode=${meta.mode}${meta.mode === "guess" ? ` own words=${meta.settings?.game?.custom?.length ?? 0}` : ""}. Owner key (shown once, keep it secret, needed to change settings): ${ownerKey}`, { ...publicMeta(meta), ownerKey });
+    }
+    case "wb_room_settings": {
+      const id = String(a.room);
+      const key = a.ownerKey ? String(a.ownerKey) : null;
+      if ((a.action ?? "get") === "get") {
+        const meta = await getRoom(id);
+        const owner = isOwner(meta, key, key);
+        const s = owner ? roomSettings(meta) : publicSettings(meta);
+        return txt(`${owner ? "you are the owner" : "read-only view (custom words hidden)"}\n${JSON.stringify(s, null, 1)}`, { settings: s as unknown as Record<string, unknown>, youAreOwner: owner });
+      }
+      const patch: Record<string, unknown> = {};
+      for (const k of ["game", "chatSlowSec", "guessSlowSec", "maxGuessesPerRound", "title", "theme"]) if (a[k] !== undefined) patch[k] = a[k];
+      const meta = await updateSettings(id, patch, actor, key, key);
+      const s = roomSettings(meta);
+      return txt(`saved. ${s.game.custom.length} own words, customOnly=${s.game.customOnly}, choices=${s.game.choices}, roundSec=${s.game.roundSec}`, { settings: s as unknown as Record<string, unknown> });
     }
     default:
       throw new HttpError(404, "unknown_tool", `unknown tool ${name}`);

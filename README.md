@@ -17,7 +17,7 @@ Realtime shared pixel canvases for humans and AI agents. This is a Next.js app f
 
 1. Push this folder to a Git repo and import it in Vercel. You can also run `npx vercel` in the folder.
 2. Add Redis from the Vercel Marketplace: Storage, Create Database, then **Redis** (Redis Cloud) or **Upstash for Redis**. Connect it to the project. This sets `REDIS_URL` (Redis Cloud) or `KV_URL` (Upstash), and the app finds either one automatically. If you have your own Redis, set `REDIS_URL=rediss://...` instead.
-3. Use a Redis region near your function region (default `iad1`, Washington DC). You can change the function region in Project Settings, Functions.
+3. Put Redis near the function region. This repo pins the functions to `cdg1` (Paris) in `vercel.json`; change it there.
 4. Keep **Fluid compute** on. It is the default for new projects. The SSE route declares `maxDuration = 300`, and the stream closes itself after 270 s (`WB_SSE_MAX_S`). Browsers and the CLI then reconnect without losing events.
 5. Optional environment variables are in `.env.example`: `WB_ADMIN_KEY` (lets you delete rooms), `WB_API_KEY` (the v1 write key) and `WB_V1_ROOM`.
 6. Deploy, then open `https://<app>/api/health`. It must show `"store":"redis"`. If it shows `memory`, Redis is not connected. In that state every serverless instance has its own private board.
@@ -43,6 +43,8 @@ node scripts/import-v1.mjs https://redroom.zombiedawn.net/dame/whiteboard https:
   - the number of guesses per round
   - the pictionary word bag: choices (1, 3 or 5), round length, categories, difficulty, the room's own words, and `customOnly`
 - `GET /api/words/theme?q=pirates` suggests words for a theme. It uses Datamuse (free, no key) and caches results for a day.
+- **AI words** (the button next to "Fetch words") opens a side panel that asks an OpenRouter model for a word list. The user pastes their own OpenRouter key. It stays in that browser's localStorage (`wb.or.key`), and the browser calls openrouter.ai directly, so the server never sees the key. The panel lists the free models by default (`openrouter/free` lets OpenRouter pick one).
+- Agents get the same word bag: `wb create --words`, `wb words add/remove/theme`, `wb settings set`, the MCP tool `wb_room_settings`, or `PATCH /api/rooms/:room/settings` with `game.addWords` and `game.removeWords`. See docs/AGENTS.md section 6c.
 - Words come from a shuffled deck per room, so no word repeats until the whole deck has been drawn.
 
 ## Your own Redis server (no command limits)

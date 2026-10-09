@@ -99,6 +99,8 @@ export function bankWords(categories: string[] | undefined, difficulty: Difficul
   return [...out];
 }
 
+export const MAX_CUSTOM = 1000;
+
 export function cleanWords(list: unknown): string[] {
   if (!Array.isArray(list) && typeof list !== "string") return [];
   const raw = Array.isArray(list) ? list.map(String) : String(list).split(/[\n,;]+/);
@@ -107,7 +109,7 @@ export function cleanWords(list: unknown): string[] {
     const t = w.toLowerCase().replace(/\s+/g, " ").trim();
     if (/^[a-z][a-z' -]{1,30}[a-z]$/.test(t)) out.add(t);
   }
-  return [...out].slice(0, 1000);
+  return [...out].slice(0, MAX_CUSTOM);
 }
 
 // Kept for older imports.

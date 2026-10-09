@@ -339,3 +339,43 @@ button, input { font: inherit; color: inherit; }
   .wordbag, .settings-grid { grid-template-columns: 1fr; }
   .palette { max-width: none; }
 }
+
+/* ---------- word bag: checkbox + AI word maker drawer ---------- */
+.create label.check, .settings-grid label.check, label.check { display: flex; flex-direction: row; gap: 8px; align-items: center; cursor: pointer; }
+.wordbag input[type="checkbox"] { width: 16px; height: 16px; padding: 0; margin: 0; accent-color: var(--hot); flex: none; }
+.btn.ai { border-color: #3a2a56; background: linear-gradient(135deg, #1d1530, #14141c); }
+.btn.ai:hover { border-color: var(--agent); }
+.drawer-back { position: fixed; inset: 0; z-index: 40; background: rgba(4, 4, 8, 0.45); }
+.drawer {
+  position: absolute; top: 0; right: 0; height: 100dvh; width: min(420px, 100%);
+  background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto;
+  padding: 0 16px 24px; box-shadow: -24px 0 48px rgba(0, 0, 0, 0.45);
+  animation: drawer-in 0.18s ease-out;
+}
+@keyframes drawer-in { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .drawer { animation: none; } }
+.drawer-head { position: sticky; top: 0; z-index: 1; display: flex; justify-content: space-between; align-items: center; padding: 14px 0 10px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.drawer-head h2 { margin: 0; font-size: 16px; }
+.drawer section { padding: 14px 0; border-bottom: 1px solid var(--line); display: grid; gap: 8px; }
+.drawer section:last-child { border-bottom: 0; }
+.drawer h3 { margin: 0; font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--agent); letter-spacing: 0.02em; display: flex; gap: 8px; align-items: baseline; }
+.drawer .help { font-size: 12px; color: var(--dim); margin: 0; }
+.drawer a.help { color: var(--agent); }
+.drawer input, .drawer select {
+  background: var(--deep); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; font: inherit; font-size: 13px; min-width: 0;
+}
+.drawer select.models { width: 100%; padding: 4px; }
+.drawer select.models option { padding: 5px 6px; border-radius: 4px; }
+.drawer select.models option:checked { background: #2a1520; color: var(--ink); }
+.drawer .stack { display: grid; gap: 6px; font-size: 13px; color: var(--dim); }
+.drawer .row-gap { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.drawer .grow { flex: 1; }
+.drawer .chips button { font-size: 12px; }
+.ai-result button[aria-pressed="false"] { opacity: 0.45; text-decoration: line-through; }
+.drawer-status { margin: 10px 0 0; font-size: 13px; color: var(--ok); }
+.drawer-status.bad { color: #ff8095; }
+.key-tools { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; margin: 4px 0 8px; }
+.key-tools .theme-row { flex-basis: 100%; }
+.linkish { background: none; border: 0; padding: 0; color: var(--agent); font: inherit; font-size: 13px; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+.linkish.danger { color: #ff8095; }
+.owner-gate .theme-row input { flex: 1; }

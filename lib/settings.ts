@@ -2,7 +2,7 @@
 // or the server admin (WB_ADMIN_KEY) can change them at any time.
 import { HttpError } from "./http";
 import type { GameCfg, RoomMeta, RoomSettings } from "./types";
-import { CATEGORIES, cleanWords } from "./words";
+import { CATEGORIES, MAX_CUSTOM, cleanWords } from "./words";
 
 export const DEFAULT_GAME: GameCfg = { choices: 3, roundSec: 120, categories: [], difficulty: "mixed", custom: [], customOnly: false };
 
@@ -67,6 +67,12 @@ export function mergeSettings(cur: RoomSettings, patch: Record<string, unknown>)
       next.game.categories = g.categories.map(String).filter((c) => CATEGORIES.includes(c));
     }
     if (g.custom !== undefined) next.game.custom = cleanWords(g.custom);
+    // addWords / removeWords edit the list without sending all of it again
+    if (g.addWords !== undefined) next.game.custom = [...new Set([...next.game.custom, ...cleanWords(g.addWords)])].slice(0, MAX_CUSTOM);
+    if (g.removeWords !== undefined) {
+      const drop = new Set(cleanWords(g.removeWords));
+      next.game.custom = next.game.custom.filter((w) => !drop.has(w));
+    }
     if (g.customOnly !== undefined) next.game.customOnly = !!g.customOnly;
     if (next.game.customOnly && next.game.custom.length < 5) throw new HttpError(400, "bad_setting", "customOnly needs at least 5 custom words");
   }
