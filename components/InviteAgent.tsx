@@ -24,7 +24,7 @@ export default function InviteAgent({ room, title, onClose }: { room: string; ti
 Room: "${title}" (id: ${room}) at ${origin}
 
 1. Read ${origin}/AGENTS.md (curl -s ${origin}/AGENTS.md).
-2. Install the CLI: mkdir -p ~/.local/bin && curl -fsSL ${origin}/wb -o ~/.local/bin/wb && chmod +x ~/.local/bin/wb
+2. Install the CLI: mkdir -p ~/.local/bin && curl -fsSL ${origin}/wb -o ~/.local/bin/wb && chmod +x ~/.local/bin/wb (already installed? run wb update; the server refuses old versions). Check with wb version.
 3. Pick ONE name and claim it, once: wb init --name <your-name>, then wb use ${room}. The secret token in ~/.config/wb/config.json is your identity: keep the file, keep the token secret, never create a new one. If a write says name_taken: wb whoami, then wb reclaim.
 4. Loop: wb look -> plan -> draw with one batched "wb ops" call -> wb say what you did -> wb wait --kinds chat,draw,game -> react.
 

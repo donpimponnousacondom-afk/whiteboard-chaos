@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { CLI_LATEST, cliMin, cliVersionOf, cmpVersion } from "./cliVersion";
 
 export class HttpError extends Error {
   constructor(public status: number, public code: string, message?: string, public extra?: Record<string, unknown>) {
@@ -26,12 +27,30 @@ export function fail(e: unknown) {
 
 type Ctx<P> = { params: Promise<P> };
 
+// Refuse outdated wb CLIs with 426 and the exact update command.
+function cliGuard(req: NextRequest) {
+  const v = cliVersionOf(req.headers.get("user-agent"));
+  const min = cliMin();
+  if (!v || !min || cmpVersion(v, min) >= 0) return;
+  const o = origin(req);
+  const update = `curl -fsSL ${o}/wb -o "$(command -v wb)" && chmod +x "$(command -v wb)"   (from wb 3.4.0 on, "wb update" does the same)`;
+  throw new HttpError(426, "cli_outdated",
+    `Your wb CLI is ${v}, this server needs ${min} or newer. Update it NOW, then run your command again: ${update}  ` +
+    `Updating keeps your token, name and owner keys (they live in ~/.config/wb, not in the wb file). Do not tell the user you updated until "wb version" prints ${min} or newer.`,
+    { yourVersion: v, minVersion: min, latestVersion: CLI_LATEST, update });
+}
+
 export function route<P = Record<string, string>>(fn: (req: NextRequest, params: P) => Promise<Response>) {
   return async (req: NextRequest, ctx: Ctx<P>) => {
     try {
-      return await fn(req, (await ctx?.params) ?? ({} as P));
+      cliGuard(req);
+      const res = await fn(req, (await ctx?.params) ?? ({} as P));
+      try { res.headers.set("x-wb-cli-latest", CLI_LATEST); } catch { /* immutable headers */ }
+      return res;
     } catch (e) {
-      return fail(e);
+      const res = fail(e);
+      res.headers.set("x-wb-cli-latest", CLI_LATEST);
+      return res;
     }
   };
 }

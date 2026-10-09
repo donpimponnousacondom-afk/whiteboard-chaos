@@ -8,8 +8,8 @@ import { api, ApiError, getIdentity, nonce, pref, setName as saveName, setPref }
 import GamePanel, { type GameState } from "./GamePanel";
 import InviteAgent from "./InviteAgent";
 import SettingsModal from "./SettingsModal";
-
-type Tool = "pencil" | "eraser" | "line" | "rect" | "circle" | "flood" | "picker" | "text" | "pan";
+import { KeysHelp, ToolWheel, type WheelPick } from "./Keys";
+import { ICON_FIT, ICON_MIRROR, ICON_UNDO, TOOLS, toolByKey, type Tool } from "./tools";
 
 interface Meta {
   id: string; title: string; theme: string; w: number; h: number; mode: "free" | "place" | "guess" | "life";
@@ -19,18 +19,6 @@ interface LogEntry { key: string; seq?: number; kind: string; actor?: string; ac
 interface Presence { name: string; kind: "human" | "agent"; t: number; status?: string; x?: number; y?: number; color?: string }
 interface Cursor { x: number; y: number; color?: string; kind?: string; t: number }
 interface WbEv { seq?: number; kind: string; actor?: string; actorKind?: string; [k: string]: unknown }
-
-const TOOLS: { id: Tool; key: string; label: string; icon: string }[] = [
-  { id: "pencil", key: "p", label: "Pencil", icon: "M3 21l3.5-1 11-11-2.5-2.5-11 11L3 21zM16 5.5l2.5 2.5 1.5-1.5L17.5 4 16 5.5z" },
-  { id: "eraser", key: "e", label: "Eraser", icon: "M4 17l7-7 6 6-4 4H8l-4-3zm9-11l6 6-2 2-6-6 2-2zM9 21h11" },
-  { id: "line", key: "l", label: "Line", icon: "M4 20L20 4" },
-  { id: "rect", key: "r", label: "Rectangle", icon: "M4 6h16v12H4z" },
-  { id: "circle", key: "c", label: "Circle", icon: "M12 4a8 8 0 100 16 8 8 0 000-16z" },
-  { id: "flood", key: "f", label: "Fill bucket", icon: "M5 11l6-6 7 7-6 6-7-7zm14 4s-2 2.2-2 3.5a2 2 0 004 0C21 17.2 19 15 19 15z" },
-  { id: "picker", key: "i", label: "Pick color", icon: "M14 4l6 6-2 2-1-1-7 7H7v-3l7-7-1-1 1-2z" },
-  { id: "text", key: "t", label: "Text", icon: "M5 5h14M12 5v14M9 19h6" },
-  { id: "pan", key: "h", label: "Pan (or hold Space)", icon: "M12 3v18M3 12h18M12 3l-3 3m3-3l3 3M12 21l-3-3m3 3l3-3M3 12l3-3m-3 3l3 3m15-3l-3-3m3 3l-3 3" },
-];
 
 const MODE_TEXT: Record<Meta["mode"], string> = {
   free: "free for all",
@@ -72,6 +60,9 @@ export default function Room({ roomId }: { roomId: string }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [narrow, setNarrow] = useState(false);
   const [feedback, setFeedback] = useState<{ text: string; tone: "good" | "close" | "bad" } | null>(null);
+  const [wheel, setWheel] = useState<{ x: number; y: number } | null>(null);
+  const [help, setHelp] = useState(false);
+  const [undoCount, setUndoCount] = useState(0);
 
   // mutable engine state (kept out of React for speed)
   const metaRef = useRef<Meta | null>(null);
@@ -105,6 +96,12 @@ export default function Room({ roomId }: { roomId: string }) {
   const wsRef = useRef<WebSocket | null>(null);
   const wsWaiters = useRef(new Map<number, { resolve: (v: Record<string, unknown>) => void; reject: (e: Error) => void }>());
   const wsSeqId = useRef(0);
+  // undo: each group maps cell -> [before, after]; a stroke is one group
+  const undoStack = useRef<Map<number, [string, string]>[]>([]);
+  const undoOpen = useRef<Map<number, [string, string]> | null>(null);
+  const mouse = useRef({ x: 0, y: 0 });
+  const wheelPick = useRef<WheelPick>(null);
+  const wheelOpen = useRef(false); wheelOpen.current = !!wheel;
 
   const flash = useCallback((text: string, tone: "info" | "bad" = "info") => {
     setToast({ text, tone });
@@ -515,14 +512,20 @@ export default function Room({ roomId }: { roomId: string }) {
     }
   }, [roomId, flash, resync]);
 
-  const enqueue = useCallback((ops: Op[]) => {
+  const enqueue = useCallback((ops: Op[], record = true) => {
     const m = metaRef.current;
     if (!m || !ops.length) return;
     // optimistic local apply
     try {
-      const r = applyOps(boardRef.current.join(""), m.w, m.h, ops, palRef.current);
+      const before = boardRef.current;
+      const r = applyOps(before.join(""), m.w, m.h, ops, palRef.current);
       const pairs: [number, string][] = [];
       r.changed.forEach((i) => pairs.push([i, r.board[i]]));
+      if (record && pairs.length) {
+        const g = undoOpen.current ?? new Map<number, [string, string]>();
+        for (const [i, ch] of pairs) { const old = g.get(i); g.set(i, [old ? old[0] : before[i], ch]); }
+        if (!undoOpen.current) { undoStack.current.push(g); if (undoStack.current.length > 60) undoStack.current.shift(); setUndoCount(undoStack.current.length); }
+      }
       setCells(pairs);
     } catch (e) { flash((e as Error).message, "bad"); return; }
     queue.current.push(...ops);
@@ -556,7 +559,7 @@ export default function Room({ roomId }: { roomId: string }) {
 
   const shapeOp = (t: Tool, a: { x: number; y: number }, b: { x: number; y: number }, shift: boolean): Op | null => {
     const c = currentColor();
-    if (t === "line") return { op: "line", x0: a.x, y0: a.y, x1: b.x, y1: b.y, c, size: 1 };
+    if (t === "line") return { op: "line", x0: a.x, y0: a.y, x1: b.x, y1: b.y, c, size: sizeRef.current };
     if (t === "rect") {
       const w = Math.abs(b.x - a.x) + 1, h = Math.abs(b.y - a.y) + 1;
       return { op: "rect", x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w, h, c, fill: shift };
@@ -622,6 +625,7 @@ export default function Room({ roomId }: { roomId: string }) {
     }
     if (t === "pencil" || t === "eraser") {
       g.mode = "draw"; g.last = p;
+      if (metaRef.current!.mode !== "place") undoOpen.current = new Map();
       if (metaRef.current!.mode === "place") { enqueue([{ op: "px", x: p.x, y: p.y, c: currentColor() }]); g.mode = "none"; return; }
       enqueue(mirrorOp({ op: "line", x0: p.x, y0: p.y, x1: p.x, y1: p.y, c: currentColor(), size: sizeRef.current }));
       return;
@@ -690,7 +694,12 @@ export default function Room({ roomId }: { roomId: string }) {
       dirty.current = true;
       if (op) enqueue(mirrorOp(op));
     }
-    if (pointers.current.size === 0) { gesture.current = { mode: "none" }; strokeColor.current = undefined; }
+    if (pointers.current.size === 0) {
+      gesture.current = { mode: "none" }; strokeColor.current = undefined;
+      const og = undoOpen.current;
+      undoOpen.current = null;
+      if (og?.size) { undoStack.current.push(og); if (undoStack.current.length > 60) undoStack.current.shift(); setUndoCount(undoStack.current.length); }
+    }
   };
 
   const onWheel = useCallback((e: WheelEvent) => {
@@ -717,29 +726,103 @@ export default function Room({ roomId }: { roomId: string }) {
     return () => c.removeEventListener("wheel", onWheel);
   }, [onWheel]);
 
-  // keyboard
+  // undo: put back the cells of my last stroke that still hold what I drew
+  const undo = useCallback(() => {
+    const m = metaRef.current;
+    if (!m) return;
+    if (m.mode === "place") { flash("Undo is off in place mode: every pixel counts.", "bad"); return; }
+    const g = undoStack.current.pop();
+    setUndoCount(undoStack.current.length);
+    if (!g) { flash("Nothing to undo."); return; }
+    const pts: [number, number, string | null][] = [];
+    let lost = 0;
+    for (const [i, [before, after]] of g) {
+      if (boardRef.current[i] !== after) { lost++; continue; }
+      pts.push([i % m.w, Math.floor(i / m.w), before === EMPTY ? null : palRef.current[ALPHABET.indexOf(before)] ?? null]);
+    }
+    if (!pts.length) { flash("Someone already drew over that stroke."); return; }
+    if (!canPaint()) { undoStack.current.push(g); setUndoCount(undoStack.current.length); return; }
+    enqueue([{ op: "pixels", pts }], false);
+    if (lost) flash(`Undone. ${lost} cells were changed by others and stay as they are.`);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enqueue, flash]);
+
+  const applyWheel = useCallback((p: WheelPick) => {
+    if (!p) return;
+    if ("tool" in p) setTool(p.tool);
+    else { setColor(p.color); if (toolRef.current === "eraser" || toolRef.current === "picker" || toolRef.current === "pan") setTool("pencil"); }
+  }, []);
+  const closeWheel = useCallback((commit: boolean) => {
+    if (commit) applyWheel(wheelPick.current);
+    wheelPick.current = null;
+    setWheel(null);
+  }, [applyWheel]);
+
+  // keyboard: plain letters for tools (left hand), never Ctrl+letter except Ctrl+Z
   useEffect(() => {
+    let ctrlTimer: ReturnType<typeof setTimeout> | null = null;
+    const cancelCtrl = () => { if (ctrlTimer) { clearTimeout(ctrlTimer); ctrlTimer = null; } };
+    const openWheel = () => { wheelPick.current = null; setWheel({ ...mouse.current }); };
+    const typing = (el: EventTarget | null) => {
+      const t = el as HTMLElement | null;
+      return !!t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable);
+    };
     const down = (e: KeyboardEvent) => {
-      const el = e.target as HTMLElement;
-      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA")) return;
-      if (e.code === "Space") { spaceDown.current = true; e.preventDefault(); return; }
+      if (typing(e.target)) return;
+      if (document.querySelector(".modal-back, .drawer-back")) return; // a dialog has the keyboard
+      if (e.key === "Control") {
+        if (!e.repeat && !wheelOpen.current) { cancelCtrl(); ctrlTimer = setTimeout(openWheel, 220); }
+        return;
+      }
+      cancelCtrl(); // Ctrl+something: not a ring
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "z" && !e.shiftKey) { e.preventDefault(); undo(); return; }
       if (e.metaKey || e.ctrlKey || e.altKey) return;
-      const t = TOOLS.find((x) => x.key === e.key.toLowerCase());
+      if (e.code === "Space") { spaceDown.current = true; e.preventDefault(); return; }
+      const k = e.key.toLowerCase();
+      if (k === "q") { if (!e.repeat && !wheelOpen.current) openWheel(); e.preventDefault(); return; }
+      if (e.key === "Escape" && wheelOpen.current) { closeWheel(false); return; }
+      if (e.repeat && k !== "[" && k !== "]" && k !== "+" && k !== "=" && k !== "-") return;
+      if (e.key === "?") { setHelp(true); e.preventDefault(); return; }
+      const t = toolByKey(k);
       if (t) { setTool(t.id); return; }
-      if (e.key === "m") setMirror((v) => !v);
-      else if (e.key === "x") { const a = colorRef.current, b = color2Ref.current; setColor(b); setColor2(a); setPref("color2", a); }
-      else if (e.key === "[") setSize((s) => Math.max(1, s - 1));
-      else if (e.key === "]") setSize((s) => Math.min(16, s + 1));
-      else if (e.key === "0") fit();
-      else if (e.key === "+" || e.key === "=") { view.current.zoom = Math.min(64, view.current.zoom * 1.25); dirty.current = true; }
-      else if (e.key === "-") { view.current.zoom = Math.max(0.5, view.current.zoom / 1.25); dirty.current = true; }
+      if (/^[1-9]$/.test(k)) {
+        const c = palRef.current[Number(k) - 1];
+        if (c) { setColor(c); if (toolRef.current === "eraser" || toolRef.current === "picker" || toolRef.current === "pan") setTool("pencil"); }
+        return;
+      }
+      if (k === "m" || k === "w") setMirror((v) => !v);
+      else if (k === "z") undo();
+      else if (k === "x") { const a = colorRef.current, b = color2Ref.current; setColor(b); setColor2(a); setPref("color2", a); }
+      else if (k === "g") { const g = document.querySelector<HTMLInputElement>(".guess input"); if (g) { g.focus(); e.preventDefault(); } }
+      else if (k === "[") setSize((s) => Math.max(1, s - 1));
+      else if (k === "]") setSize((s) => Math.min(16, s + 1));
+      else if (k === "0") fit();
+      else if (k === "+" || k === "=") { view.current.zoom = Math.min(64, view.current.zoom * 1.25); dirty.current = true; }
+      else if (k === "-") { view.current.zoom = Math.max(0.5, view.current.zoom / 1.25); dirty.current = true; }
       else if (e.key === "Enter") { (document.getElementById("chat-input") as HTMLInputElement | null)?.focus(); e.preventDefault(); }
     };
-    const up = (e: KeyboardEvent) => { if (e.code === "Space") spaceDown.current = false; };
+    const up = (e: KeyboardEvent) => {
+      if (e.code === "Space") spaceDown.current = false;
+      if (e.key === "Control") { cancelCtrl(); if (wheelOpen.current) closeWheel(true); }
+      if (e.key.toLowerCase() === "q" && wheelOpen.current) closeWheel(true);
+    };
+    const move = (e: PointerEvent) => { mouse.current = { x: e.clientX, y: e.clientY }; };
+    const press = () => cancelCtrl(); // Ctrl+click is something else
+    const blur = () => { cancelCtrl(); spaceDown.current = false; if (wheelOpen.current) closeWheel(false); };
     window.addEventListener("keydown", down);
     window.addEventListener("keyup", up);
-    return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
-  }, [fit]);
+    window.addEventListener("pointermove", move, { passive: true });
+    window.addEventListener("pointerdown", press, true);
+    window.addEventListener("wheel", press, { capture: true, passive: true }); // Ctrl+wheel zooms, no ring
+    window.addEventListener("blur", blur);
+    return () => {
+      cancelCtrl();
+      window.removeEventListener("keydown", down); window.removeEventListener("keyup", up);
+      window.removeEventListener("pointermove", move); window.removeEventListener("pointerdown", press, true);
+      window.removeEventListener("wheel", press, true);
+      window.removeEventListener("blur", blur);
+    };
+  }, [fit, undo, closeWheel]);
 
   // ---------------------------------------------------------------- actions
   const sendChat = async (e: React.FormEvent) => {
@@ -927,20 +1010,38 @@ export default function Room({ roomId }: { roomId: string }) {
 
           <nav className="dock" aria-label="Tools">
             {TOOLS.map((t) => (
-              <button key={t.id} className={tool === t.id ? "on" : ""} onClick={() => setTool(t.id)} title={`${t.label} (${t.key.toUpperCase()})`} aria-label={t.label} aria-pressed={tool === t.id}>
+              <button key={t.id} className={`tip-host${tool === t.id ? " on" : ""}`} onClick={() => setTool(t.id)} aria-label={`${t.label} (${t.keys[0].toUpperCase()})`} aria-pressed={tool === t.id} aria-keyshortcuts={t.keys[0].toUpperCase()}>
                 <svg viewBox="0 0 24 24" aria-hidden><path d={t.icon} /></svg>
+                <kbd className="kc" aria-hidden>{t.keys[0].toUpperCase()}</kbd>
+                <span className="tip" aria-hidden>{t.label}{t.keys.length > 1 && <small> also {t.keys.slice(1).join(", ").toUpperCase()}</small>}</span>
               </button>
             ))}
             <span className="sep" />
-            <button className={mirror ? "on" : ""} onClick={() => setMirror((v) => !v)} title="Mirror drawing left/right (M)" aria-pressed={mirror} aria-label="Mirror">
-              <svg viewBox="0 0 24 24" aria-hidden><path d="M12 3v18M9 7L4 12l5 5V7zm6 0l5 5-5 5V7z" /></svg>
+            <button className={`tip-host${mirror ? " on" : ""}`} onClick={() => setMirror((v) => !v)} aria-pressed={mirror} aria-label="Mirror left and right (W)" aria-keyshortcuts="W">
+              <svg viewBox="0 0 24 24" aria-hidden><path d={ICON_MIRROR} /></svg>
+              <kbd className="kc" aria-hidden>W</kbd>
+              <span className="tip" aria-hidden>Mirror left and right</span>
             </button>
-            <div className="size" title="Brush size ([ and ])">
-              <button onClick={() => setSize((s) => Math.max(1, s - 1))} aria-label="Smaller brush">-</button>
+            <button className="tip-host" onClick={undo} disabled={!undoCount} aria-label="Undo my last stroke (Z or Ctrl+Z)" aria-keyshortcuts="Z Control+Z">
+              <svg viewBox="0 0 24 24" aria-hidden><path d={ICON_UNDO} /></svg>
+              <kbd className="kc" aria-hidden>Z</kbd>
+              <span className="tip" aria-hidden>Undo my last stroke<small> also Ctrl+Z</small></span>
+            </button>
+            <div className="size tip-host" aria-label="Brush size">
+              <button onClick={() => setSize((s) => Math.max(1, s - 1))} aria-label="Smaller brush ([)">-</button>
               <span className="num">{size}</span>
-              <button onClick={() => setSize((s) => Math.min(16, s + 1))} aria-label="Bigger brush">+</button>
+              <button onClick={() => setSize((s) => Math.min(16, s + 1))} aria-label="Bigger brush (])">+</button>
+              <span className="tip" aria-hidden>Brush size <kbd>[</kbd> <kbd>]</kbd></span>
             </div>
-            <button onClick={fit} title="Fit to screen (0)" aria-label="Fit to screen"><svg viewBox="0 0 24 24" aria-hidden><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></svg></button>
+            <button className="tip-host" onClick={fit} aria-label="Fit to screen (0)" aria-keyshortcuts="0">
+              <svg viewBox="0 0 24 24" aria-hidden><path d={ICON_FIT} /></svg>
+              <kbd className="kc" aria-hidden>0</kbd>
+              <span className="tip" aria-hidden>Fit to screen</span>
+            </button>
+            <button className="tip-host help-btn" onClick={() => setHelp(true)} aria-label="Keyboard shortcuts (?)" aria-keyshortcuts="?">
+              <span aria-hidden>?</span>
+              <span className="tip" aria-hidden>All shortcuts. Hold <kbd>Q</kbd> or <kbd>Ctrl</kbd> for the tool ring</span>
+            </button>
           </nav>
 
           <div className="palette" aria-label="Colors">
@@ -950,7 +1051,7 @@ export default function Room({ roomId }: { roomId: string }) {
             </div>
             <div className="swatches">
               {palette.map((p, i) => (
-                <button key={p + i} style={{ background: p }} className={color === p && tool !== "eraser" ? "on" : ""} title={`${p}: click for the main color, right click for the second color`}
+                <button key={p + i} style={{ background: p }} className={color === p && tool !== "eraser" ? "on" : ""} title={`${p}${i < 9 ? ` (key ${i + 1})` : ""}: click for the main color, right click for the second color`} data-k={i < 9 ? i + 1 : undefined}
                   onClick={() => { setColor(p); if (tool === "eraser" || tool === "picker" || tool === "pan") setTool("pencil"); }}
                   onContextMenu={(e) => { e.preventDefault(); setColor2(p); setPref("color2", p); }} aria-label={`Color ${p}`} />
               ))}
@@ -1015,6 +1116,8 @@ export default function Room({ roomId }: { roomId: string }) {
         </div>
       )}
 
+      {wheel && <ToolWheel at={wheel} tool={tool} color={tool === "eraser" ? "transparent" : color} colors={palette} onHover={(p) => { wheelPick.current = p; }} onPick={(p) => { wheelPick.current = p; closeWheel(true); }} />}
+      {help && <KeysHelp onClose={() => setHelp(false)} guessRoom={m?.mode === "guess"} />}
       {settingsOpen && m && <SettingsModal roomId={m.id} mode={m.mode} title={m.title} theme={m.theme} onClose={() => setSettingsOpen(false)} flash={flash} />}
       {invite && m && <InviteAgent room={m.id} title={m.title} onClose={() => setInvite(false)} />}
     </div>

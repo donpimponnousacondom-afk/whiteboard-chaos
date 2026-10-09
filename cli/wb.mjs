@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 
-const VERSION = "3.3.0";
+const VERSION = "3.4.0";
 const HOME = process.env.WB_HOME || path.join(os.homedir(), ".config", "wb");
 const CFG_FILE = path.join(HOME, "config.json");
 const STATE_FILE = path.join(HOME, "state.json");
@@ -69,6 +69,13 @@ async function api(method, p, body, { raw = false, retry = !flags["no-retry"], e
       await sleep(wait + 30);
       continue;
     }
+    if (res.status === 426) {
+      const j = await res.json().catch(() => ({}));
+      die(`this wb is TOO OLD for the server (you have ${VERSION}, it needs ${j.minVersion || "a newer one"}).
+Run:  wb update
+then run your command again. Your token, name and owner keys are kept.`, 3);
+    }
+    warnIfOld(res);
     if (raw) return res;
     const ct = res.headers.get("content-type") || "";
     const data = ct.includes("json") ? await res.json() : await res.text();
@@ -78,6 +85,30 @@ async function api(method, p, body, { raw = false, retry = !flags["no-retry"], e
     }
     return data;
   }
+}
+
+let warned = false;
+const newer = (a, b) => { const pa = a.split(".").map(Number), pb = b.split(".").map(Number); for (let i = 0; i < 3; i++) if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0); return false; };
+function warnIfOld(res) {
+  const latest = res.headers.get("x-wb-cli-latest");
+  if (warned || !latest || !newer(latest, VERSION)) return;
+  warned = true;
+  process.stderr.write(`wb: a newer wb exists (${latest}, you have ${VERSION}). Run: wb update\n`);
+}
+
+// Replace this file with the server's current wb. Config, token and owner keys
+// live in ${HOME}, so they are not touched.
+async function selfUpdate() {
+  const self = fs.realpathSync(process.argv[1]);
+  const res = await fetch(`${URL_}/wb`, { headers: { "user-agent": `wb-cli/${VERSION} (update)` } });
+  if (!res.ok) die(`download failed: HTTP ${res.status} from ${URL_}/wb`);
+  const code = await res.text();
+  const v = /const VERSION = "(\d+\.\d+\.\d+)"/.exec(code)?.[1];
+  if (!code.startsWith("#!/usr/bin/env node") || !v) die(`${URL_}/wb did not look like the wb CLI; nothing changed`);
+  const tmp = `${self}.new-${process.pid}`;
+  fs.writeFileSync(tmp, code, { mode: 0o755 });
+  fs.renameSync(tmp, self);
+  out({ from: VERSION, to: v, path: self }, () => `${v === VERSION ? "already up to date" : "updated"}: wb ${VERSION} -> ${v} (${self}). Token and config kept in ${HOME}.\n`);
 }
 
 const state = readJson(STATE_FILE, { seq: {} });
@@ -200,6 +231,8 @@ setup
   init --name NAME [--url URL]      save your identity to ${CFG_FILE}. Run it ONCE. The token in that
                                     file is your identity: keep it, keep it secret, never replace it
   whoami                            your name, token fingerprint, and whether the server binds them
+  update                            replace this wb with the server's current version (keeps your token)
+  version                           your version, and whether the server has a newer one
   reclaim [NAME]                    bind NAME (default: yours) to your token. Recovers your own name;
                                     can also take over someone else's (blindfold mode, 1 per hour)
   use ROOM                          set default room (now: ${ROOM_FLAG})
@@ -255,7 +288,13 @@ async function main() {
   const room = ROOM_FLAG;
   if (!cmd || cmd === "help" || flags.help) { process.stdout.write(HELP); return; }
   switch (cmd) {
-    case "version": out(VERSION); return;
+    case "version": {
+      let latest = null;
+      try { const r = await fetch(`${URL_}/api/health`, { headers: headers() }); latest = r.headers.get("x-wb-cli-latest"); } catch { /* offline */ }
+      out({ version: VERSION, server: latest }, (d) => `${d.version}${d.server ? (newer(d.server, d.version) ? `  (server has ${d.server}: run wb update)` : "  (up to date)") : ""}\n`);
+      return;
+    }
+    case "update": await selfUpdate(); return;
     case "init": {
       const name = flags.name || pos[0] || cfg.name;
       if (!name) die("usage: wb init --name NAME");

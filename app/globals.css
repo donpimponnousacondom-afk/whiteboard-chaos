@@ -379,3 +379,79 @@ button, input { font: inherit; color: inherit; }
 .linkish { background: none; border: 0; padding: 0; color: var(--agent); font: inherit; font-size: 13px; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
 .linkish.danger { color: #ff8095; }
 .owner-gate .theme-row input { flex: 1; }
+
+/* ---------- keyboard: keycaps, dock tips, tool ring, help ---------- */
+kbd, .kc {
+  font-family: var(--mono); font-size: 10px; line-height: 1; color: var(--ink);
+  display: inline-grid; place-items: center; min-width: 16px; height: 16px; padding: 0 4px;
+  background: #1f1f2d; border: 1px solid #34344c; border-bottom-width: 2px; border-radius: 4px;
+}
+.dock .tip-host { position: relative; }
+.dock .kc {
+  position: absolute; right: 1px; bottom: 1px; min-width: 12px; height: 12px; padding: 0 2px;
+  font-size: 8px; color: var(--dim); background: rgba(11, 11, 16, 0.85); border-color: #2a2a3e; border-bottom-width: 1px; pointer-events: none;
+}
+.dock button.on .kc { color: var(--ink); border-color: var(--hot); }
+.dock .tip {
+  position: absolute; left: calc(100% + 10px); top: 50%; transform: translate(-4px, -50%);
+  white-space: nowrap; pointer-events: none; opacity: 0; z-index: 5;
+  display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-radius: 7px;
+  background: #0f0f17; border: 1px solid var(--line); color: var(--ink); font-size: 12px;
+  transition: opacity 0.12s 0.15s, transform 0.12s 0.15s;
+}
+.dock .tip small { color: var(--dim); font-size: 11px; }
+.dock .tip-host:hover .tip, .dock .tip-host:focus-visible .tip { opacity: 1; transform: translate(0, -50%); }
+.dock .help-btn span[aria-hidden]:first-child { font-family: var(--mono); font-weight: 800; font-size: 15px; }
+.dock button:disabled { opacity: 0.35; cursor: default; }
+.dock button:disabled:hover { background: transparent; }
+.swatches button { position: relative; }
+.swatches button[data-k]::after {
+  content: attr(data-k); position: absolute; inset: 0; display: grid; place-items: center;
+  font: 700 9px/1 var(--mono); color: #fff; text-shadow: 0 0 2px #000, 0 0 3px #000; opacity: 0; transition: opacity 0.12s;
+}
+.palette:hover .swatches button[data-k]::after { opacity: 0.9; }
+
+.wheel { position: fixed; z-index: 60; pointer-events: none; animation: wheel-in 0.09s ease-out; }
+.wheel svg { display: block; overflow: visible; pointer-events: none; }
+.wheel .slice, .wheel .swatch { pointer-events: auto; cursor: pointer; }
+.wheel .slice > path { fill: rgba(17, 17, 25, 0.96); stroke: var(--line); stroke-width: 1; transition: fill 0.08s; }
+.wheel .slice .ico { fill: none; stroke: var(--dim); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.wheel .slice text { font: 700 9px var(--mono); fill: var(--dim); }
+.wheel .slice.cur .ico { stroke: var(--ink); }
+.wheel .slice.hot > path { fill: #2a1520; stroke: var(--hot); stroke-width: 1.5; }
+.wheel .slice.hot .ico { stroke: #fff; }
+.wheel .slice.hot text { fill: var(--hot); }
+.wheel .swatch { stroke: rgba(7, 7, 11, 0.9); stroke-width: 1.5; }
+.wheel .swatch.hot { stroke: #fff; stroke-width: 2.5; }
+.wheel .core { stroke: var(--ink); stroke-width: 2; }
+.wheel-label {
+  position: absolute; left: 50%; transform: translateX(-50%); white-space: nowrap;
+  font-size: 12px; padding: 3px 9px; border-radius: 999px; background: #0f0f17; border: 1px solid var(--line); color: var(--ink);
+}
+@keyframes wheel-in { from { opacity: 0; transform: scale(0.88); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .wheel { animation: none; } .dock .tip { transition: none; } }
+
+.modal.keys-help { width: min(760px, 100%); }
+.keys-lede { color: var(--dim); font-size: 14px; margin: 0 0 14px; max-width: 60ch; }
+.keyboard { display: grid; gap: 8px; margin-bottom: 18px; overflow-x: auto; padding-bottom: 4px; }
+.krow { display: flex; gap: 8px; }
+.kcap {
+  position: relative; flex: none; width: 92px; height: 74px; border-radius: 10px;
+  display: grid; grid-template-rows: 1fr auto; justify-items: center; align-items: center; padding: 8px 6px 7px;
+  background: linear-gradient(#1e1e2c, #171722); border: 1px solid #30304a; border-bottom: 4px solid #08080d;
+}
+.kcap .kletter { position: absolute; left: 7px; top: 5px; font: 700 11px var(--mono); color: var(--dim); }
+.kcap svg { width: 22px; height: 22px; fill: none; stroke: var(--ink); stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; margin-top: 6px; }
+.kcap .kname { font-size: 11px; color: var(--ink); text-align: center; line-height: 1.2; }
+.kcap.idle { opacity: 0.32; }
+.kcap.hold { border-color: #2b5964; }
+.kcap.hold .kletter { color: var(--agent); }
+.keys-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 22px; margin: 0; }
+.keys-list > div { display: grid; grid-template-columns: 112px 1fr; gap: 10px; align-items: baseline; font-size: 13px; }
+.keys-list dt { display: flex; gap: 4px; flex-wrap: wrap; }
+.keys-list dd { margin: 0; color: var(--dim); }
+@media (max-width: 760px) {
+  .keys-list { grid-template-columns: 1fr; }
+  .kcap { width: 70px; height: 66px; }
+  .dock .tip, .dock .kc { display: none; }
+}

@@ -7,7 +7,7 @@ const cors = [
     key: "Access-Control-Allow-Headers",
     value: "Content-Type, X-WB-Name, X-WB-Token, X-WB-Kind, X-WB-Key, X-WB-Owner, X-WB-Admin, X-API-Key, Last-Event-ID, Mcp-Session-Id, Mcp-Protocol-Version, Authorization",
   },
-  { key: "Access-Control-Expose-Headers", value: "X-WB-Seq, Retry-After, Mcp-Session-Id" },
+  { key: "Access-Control-Expose-Headers", value: "X-WB-Seq, Retry-After, Mcp-Session-Id, X-WB-CLI-Latest" },
 ];
 
 const config: NextConfig = {

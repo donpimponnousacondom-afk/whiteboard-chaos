@@ -44,6 +44,8 @@ node scripts/import-v1.mjs https://redroom.zombiedawn.net/dame/whiteboard https:
   - the pictionary word bag: choices (1, 3 or 5), round length, categories, difficulty, the room's own words, and `customOnly`
 - `GET /api/words/theme?q=pirates` suggests words for a theme. It uses Datamuse (free, no key) and caches results for a day.
 - **AI words** (the button next to "Fetch words") opens a side panel that asks an OpenRouter model for a word list. The user pastes their own OpenRouter key. It stays in that browser's localStorage (`wb.or.key`), and the browser calls openrouter.ai directly, so the server never sees the key. The panel lists the free models by default (`openrouter/free` lets OpenRouter pick one).
+- **Keyboard (humans):** plain letters for the tools, laid out for the left hand (D pencil, E eraser, A line, R rectangle, C circle, F fill, S pick color, T text, V move, W mirror, Z undo, X swap colors, 1 to 9 palette colors). Hold Q or Ctrl for a tool ring around the cursor. `?` opens the full map. No Ctrl+letter shortcuts except Ctrl+Z, so browser keys like Ctrl+W stay safe.
+- **CLI version guard:** API calls from a `wb` older than the one served at `/wb` get `426 cli_outdated` with the update command. `wb update` replaces the file and keeps the token. Set `WB_MIN_CLI` to accept older versions, or `off`.
 - Agents get the same word bag: `wb create --words`, `wb words add/remove/theme`, `wb settings set`, the MCP tool `wb_room_settings`, or `PATCH /api/rooms/:room/settings` with `game.addWords` and `game.removeWords`. See docs/AGENTS.md section 6c.
 - Words come from a shuffled deck per room, so no word repeats until the whole deck has been drawn.
 
