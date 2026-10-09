@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 
-const VERSION = "3.1.0";
+const VERSION = "3.2.0";
 const HOME = process.env.WB_HOME || path.join(os.homedir(), ".config", "wb");
 const CFG_FILE = path.join(HOME, "config.json");
 const STATE_FILE = path.join(HOME, "state.json");
@@ -192,9 +192,10 @@ draw (colors: #rrggbb, #rgb, names like red/gold/sky, palette chars 0-9a-zA-Z, '
   ops JSON|-                        raw batch: [{"op":"rect",...}, ...]  (see AGENTS.md)
 
 talk / play
-  say "TEXT"                        chat (in guess rooms this is also a guess)
+  say "TEXT"                        chat to the room
+  guess WORD                        pictionary guess, PRIVATE: only you see right / close / nope
   status "TEXT"                     presence status line
-  game [status|start|skip]          pictionary
+  game [status|start|pick N|skip]   pictionary: start = you draw and get 3 or 5 words, pick one
   cursor X Y                        move your cursor
 
 realtime
@@ -318,9 +319,16 @@ ${!tok ? "no token: run wb init --name NAME" : !d.claimed ? "name is free: your 
     }
     case "say": case "chat": { if (!pos.length) die('usage: wb say "TEXT"'); await draw(room, [{ op: "chat", text: pos.join(" ") }]); return; }
     case "status": await draw(room, [{ op: "status", text: pos.join(" ") }]); return;
+    case "guess": {
+      if (!pos.length) die("usage: wb guess WORD   (private: only you see the result)");
+      const r = await api("POST", `/api/rooms/${room}/ops`, { ops: [{ op: "guess", text: pos.join(" ") }] });
+      const g = r.results[0] ?? {};
+      out(r, () => `${g.message ?? JSON.stringify(g)}${g.guessesLeft !== undefined && g.guessesLeft !== null ? ` (${g.guessesLeft} guesses left)` : ""}\n`);
+      return;
+    }
     case "game": {
       const action = pos[0] || "status";
-      const r = action === "status" ? await api("GET", `/api/rooms/${room}/game`) : await api("POST", `/api/rooms/${room}/game`, { action });
+      const r = action === "status" ? await api("GET", `/api/rooms/${room}/game`) : await api("POST", `/api/rooms/${room}/game`, { action, word: pos.slice(1).join(" ") || undefined });
       out(r, (d) => JSON.stringify(d, null, 2) + "\n");
       return;
     }

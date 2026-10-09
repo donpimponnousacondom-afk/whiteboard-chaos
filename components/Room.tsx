@@ -4,8 +4,10 @@ import Link from "next/link";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ALPHABET, EMPTY, hexToRgb, normHex } from "@/lib/palette";
 import { applyOps, decodeDelta, READ_OPS, type Op } from "@/lib/raster";
-import { api, ApiError, getIdentity, nonce, setName as saveName } from "./client";
+import { api, ApiError, getIdentity, nonce, pref, setName as saveName, setPref } from "./client";
+import GamePanel, { type GameState } from "./GamePanel";
 import InviteAgent from "./InviteAgent";
+import SettingsModal from "./SettingsModal";
 
 type Tool = "pencil" | "eraser" | "line" | "rect" | "circle" | "flood" | "picker" | "text" | "pan";
 
@@ -16,10 +18,6 @@ interface Meta {
 interface LogEntry { key: string; seq?: number; kind: string; actor?: string; actorKind?: string; text: string; t: number }
 interface Presence { name: string; kind: "human" | "agent"; t: number; status?: string; x?: number; y?: number; color?: string }
 interface Cursor { x: number; y: number; color?: string; kind?: string; t: number }
-interface GameState {
-  status: string; round?: number; drawer?: string; hint?: string; endsAt?: number; word?: string; youAreDrawer?: boolean;
-  scores?: { name: string; score: number }[]; lastWord?: string | null; lastWinner?: string | null; len?: number;
-}
 interface WbEv { seq?: number; kind: string; actor?: string; actorKind?: string; [k: string]: unknown }
 
 const TOOLS: { id: Tool; key: string; label: string; icon: string }[] = [
@@ -66,6 +64,14 @@ export default function Room({ roomId }: { roomId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [railTab, setRailTab] = useState<"chat" | "people">("chat");
   const [transport, setTransport] = useState<"ws" | "sse" | null>(null);
+  const [color2, setColor2] = useState("#ffffff");
+  const [rightMode, setRightMode] = useState<"erase" | "secondary" | "pick">("erase");
+  const [recent, setRecent] = useState<string[]>([]);
+  const [chatFloat, setChatFloat] = useState(false);
+  const [floatBox, setFloatBox] = useState({ x: 24, y: 120, w: 340, h: 420 });
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [narrow, setNarrow] = useState(false);
+  const [feedback, setFeedback] = useState<{ text: string; tone: "good" | "close" | "bad" } | null>(null);
 
   // mutable engine state (kept out of React for speed)
   const metaRef = useRef<Meta | null>(null);
@@ -93,6 +99,9 @@ export default function Room({ roomId }: { roomId: string }) {
   const cooldownRef = useRef(0); cooldownRef.current = cooldownUntil;
   const gameRef = useRef<GameState | null>(null); gameRef.current = game;
   const spaceDown = useRef(false);
+  const strokeColor = useRef<string | null | undefined>(undefined); // color of the stroke in progress (per mouse button)
+  const color2Ref = useRef(color2); color2Ref.current = color2;
+  const rightModeRef = useRef(rightMode); rightModeRef.current = rightMode;
   const wsRef = useRef<WebSocket | null>(null);
   const wsWaiters = useRef(new Map<number, { resolve: (v: Record<string, unknown>) => void; reject: (e: Error) => void }>());
   const wsSeqId = useRef(0);
@@ -404,6 +413,7 @@ export default function Room({ roomId }: { roomId: string }) {
         if (r.game) setGame(r.game);
         view.current.fitted = false;
         fit();
+        if (new URLSearchParams(location.search).get("owner") === "1") flash("You own this room. Open Settings to set slowmode, guess limits and the word bag.");
         // recent history for context
         try {
           const lg = await api<{ events: WbEv[] }>(`/api/rooms/${roomId}/log?limit=60&kinds=chat,game,system,meta,draw`);
@@ -429,6 +439,36 @@ export default function Room({ roomId }: { roomId: string }) {
     const c = setInterval(() => setNow(Date.now()), 500);
     return () => { clearInterval(a); clearInterval(b); clearInterval(c); };
   }, [roomId, refreshPresence]);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 860px)");
+    const on = () => setNarrow(mq.matches);
+    on(); mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+
+  // per-browser drawing preferences
+  useEffect(() => {
+    setRightMode(pref("right", "erase") as "erase" | "secondary" | "pick");
+    setColor2(pref("color2", "#ffffff"));
+    setRecent(pref("recent", "").split(",").filter((c) => /^#[0-9a-f]{6}$/i.test(c)));
+    setChatFloat(pref("chatFloat", "0") === "1");
+    try { const b = JSON.parse(pref("floatBox", "")); if (b && typeof b.x === "number") setFloatBox(b); } catch { /* default */ }
+  }, []);
+  const rememberColor = (hex: string) => {
+    const h = hex.toLowerCase();
+    setRecent((r) => { const next = [h, ...r.filter((c) => c !== h)].slice(0, 10); setPref("recent", next.join(",")); return next; });
+  };
+  const eyedrop = async () => {
+    const ED = (window as unknown as { EyeDropper?: new () => { open: () => Promise<{ sRGBHex: string }> } }).EyeDropper;
+    if (!ED) { setTool("picker"); flash("This browser has no screen color picker (it works in Chrome and Edge). Click a pixel on the board instead."); return; }
+    try {
+      const r = await new ED().open();
+      const hex = normHex(r.sRGBHex) ?? r.sRGBHex;
+      setColor(hex); rememberColor(hex);
+      if (toolRef.current === "eraser" || toolRef.current === "picker") setTool("pencil");
+    } catch { /* cancelled */ }
+  };
 
   // life autoplay
   useEffect(() => {
@@ -503,7 +543,16 @@ export default function Room({ roomId }: { roomId: string }) {
     }
   };
 
-  const currentColor = () => (toolRef.current === "eraser" ? null : colorRef.current);
+  const currentColor = () => (strokeColor.current !== undefined ? strokeColor.current : toolRef.current === "eraser" ? null : colorRef.current);
+
+  const pickAt = (x: number, y: number) => {
+    const m = metaRef.current;
+    if (!m) return;
+    const ch = boardRef.current[y * m.w + x];
+    if (ch === EMPTY) { flash("That cell is empty."); return; }
+    const hex = palRef.current[ALPHABET.indexOf(ch)];
+    if (hex) { setColor(hex); if (toolRef.current === "eraser" || toolRef.current === "picker") setTool("pencil"); }
+  };
 
   const shapeOp = (t: Tool, a: { x: number; y: number }, b: { x: number; y: number }, shift: boolean): Op | null => {
     const c = currentColor();
@@ -555,17 +604,15 @@ export default function Room({ roomId }: { roomId: string }) {
       return;
     }
     const t = toolRef.current;
-    if (e.button === 1 || e.button === 2 || t === "pan" || spaceDown.current) {
+    if (e.button === 1 || t === "pan" || spaceDown.current) {
       g.mode = "pan";
       g.panStart = { px: view.current.px, py: view.current.py, sx: p.sx, sy: p.sy };
       return;
     }
     if (!inBoard(p)) return;
-    if (t === "picker") {
-      const ch = boardRef.current[p.y * metaRef.current!.w + p.x];
-      if (ch !== EMPTY) { setColor(palRef.current[ALPHABET.indexOf(ch)]); setTool("pencil"); }
-      return;
-    }
+    const right = e.button === 2;
+    if (t === "picker" || e.altKey || (right && rightModeRef.current === "pick")) { pickAt(p.x, p.y); return; }
+    strokeColor.current = right ? (rightModeRef.current === "secondary" ? color2Ref.current : null) : undefined;
     if (!canPaint()) return;
     if (t === "flood") { enqueue(mirrorOp({ op: "flood", x: p.x, y: p.y, c: currentColor() })); return; }
     if (t === "text") {
@@ -643,7 +690,7 @@ export default function Room({ roomId }: { roomId: string }) {
       dirty.current = true;
       if (op) enqueue(mirrorOp(op));
     }
-    if (pointers.current.size === 0) gesture.current = { mode: "none" };
+    if (pointers.current.size === 0) { gesture.current = { mode: "none" }; strokeColor.current = undefined; }
   };
 
   const onWheel = useCallback((e: WheelEvent) => {
@@ -680,8 +727,9 @@ export default function Room({ roomId }: { roomId: string }) {
       const t = TOOLS.find((x) => x.key === e.key.toLowerCase());
       if (t) { setTool(t.id); return; }
       if (e.key === "m") setMirror((v) => !v);
+      else if (e.key === "x") { const a = colorRef.current, b = color2Ref.current; setColor(b); setColor2(a); setPref("color2", a); }
       else if (e.key === "[") setSize((s) => Math.max(1, s - 1));
-      else if (e.key === "]") setSize((s) => Math.min(8, s + 1));
+      else if (e.key === "]") setSize((s) => Math.min(16, s + 1));
       else if (e.key === "0") fit();
       else if (e.key === "+" || e.key === "=") { view.current.zoom = Math.min(64, view.current.zoom * 1.25); dirty.current = true; }
       else if (e.key === "-") { view.current.zoom = Math.max(0.5, view.current.zoom / 1.25); dirty.current = true; }
@@ -700,19 +748,14 @@ export default function Room({ roomId }: { roomId: string }) {
     if (!text) return;
     setChat("");
     try {
-      const r = await api<{ results: { correct?: boolean; close?: boolean; message?: string }[] }>(`/api/rooms/${roomId}/ops`, { body: { ops: [{ op: "chat", text }] } });
+      const r = await api<{ results: { swallowed?: boolean; correct?: boolean; close?: boolean; message?: string }[] }>(`/api/rooms/${roomId}/ops`, { body: { ops: [{ op: "chat", text }] } });
       const res = r.results[0];
-      if (res?.correct) flash("Correct! +2 points.");
-      else if (res?.close) flash("So close. Keep guessing.");
+      if (res?.swallowed) {
+        // a hit or near hit never reaches the room: answer privately
+        setFeedback({ text: res.correct ? res.message ?? "Correct!" : `"${text}" is so close. It was kept private. Check the spelling.`, tone: res.correct ? "good" : "close" });
+        if (res.correct) refreshGame();
+      }
     } catch (err) { flash((err as Error).message, "bad"); setChat(text); }
-  };
-
-  const gameAction = async (action: "start" | "skip") => {
-    try {
-      const r = await api<GameState & { word?: string }>(`/api/rooms/${roomId}/game`, { body: { action } });
-      if (r.word && action === "start") flash(`Your word: ${r.word}. Draw it, no letters.`);
-      refreshGame();
-    } catch (e) { flash((e as Error).message, "bad"); }
   };
 
   const commitName = (n: string) => {
@@ -774,6 +817,68 @@ export default function Room({ roomId }: { roomId: string }) {
   const agents = presence.length - humans;
   const roundLeft = game?.status === "active" && game.endsAt ? Math.max(0, Math.ceil((game.endsAt - now) / 1000)) : 0;
 
+  const dockChat = (float: boolean) => { setChatFloat(float); setPref("chatFloat", float ? "1" : "0"); };
+  const startDrag = (e: React.PointerEvent) => {
+    const start = { mx: e.clientX, my: e.clientY, ...floatBox };
+    const move = (ev: PointerEvent) => {
+      const x = Math.max(0, Math.min(window.innerWidth - 120, start.x + ev.clientX - start.mx));
+      const y = Math.max(0, Math.min(window.innerHeight - 60, start.y + ev.clientY - start.my));
+      setFloatBox((b) => ({ ...b, x, y }));
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up);
+      setFloatBox((b) => { setPref("floatBox", JSON.stringify(b)); return b; });
+    };
+    window.addEventListener("pointermove", move); window.addEventListener("pointerup", up);
+  };
+  const chatBlock = (
+    <>
+          <div className="tabs" role="tablist">
+        <button role="tab" aria-selected={railTab === "chat"} onClick={() => setRailTab("chat")}>Chat</button>
+        <button role="tab" aria-selected={railTab === "people"} onClick={() => setRailTab("people")}>Here now <span className="num">{presence.length}</span></button>
+        {railTab === "chat" && (
+          <label className="toggle"><input type="checkbox" checked={showDraws} onChange={(e) => setShowDraws(e.target.checked)} /> strokes</label>
+        )}
+        {!chatFloat && !narrow && <button className="float-btn" onClick={() => dockChat(true)} title="Float the chat over the canvas">Float</button>}
+      </div>
+
+      {railTab === "people" ? (
+        <ul className="people">
+          {presence.length === 0 && <li className="empty">Nobody else yet. Invite an agent to get things moving.</li>}
+          {presence.map((p) => (
+            <li key={p.name} className={p.kind}>
+              <span className="who">{p.name}{p.name === myName ? " (you)" : ""}</span>
+              <span className="kind">{p.kind === "agent" ? "agent" : "human"}</span>
+              {p.status && <span className="status">{p.status}</span>}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <div className="log-wrap">
+        <div className="log" aria-live="polite" ref={logBox} onScroll={onLogScroll}>
+          {visibleLog.length === 0 && <p className="empty">No messages yet. Say hi, or press Enter to start typing.</p>}
+          {visibleLog.map((l) => (
+            <div key={l.key} className={`entry ${l.kind}`}>
+              {l.actor && (l.kind === "chat" || l.kind === "draw") && <span className={`who ${l.actorKind}`}>{l.actor}</span>}
+              <span className="text">{l.text}</span>
+            </div>
+          ))}
+        </div>
+        {unread > 0 && (
+          <button className="jump" onClick={toBottom}>{unread === 1 ? "1 new message" : `${unread} new messages`}</button>
+        )}
+        </div>
+      )}
+
+      <form className="say" onSubmit={sendChat}>
+        <input id="chat-input" value={chat} onChange={(e) => setChat(e.target.value)} maxLength={280}
+          placeholder={m?.mode === "guess" && game?.status === "active" && game.drawer !== myName ? "Chat (guesses go in the guess box)" : "Say something"} autoComplete="off" />
+        <button className="btn" type="submit">Send</button>
+      </form>
+
+    </>
+  );
+
   return (
     <div className="room">
       <header className="room-bar">
@@ -794,6 +899,7 @@ export default function Room({ roomId }: { roomId: string }) {
             <span>You</span>
             <input value={name} onChange={(e) => setName(e.target.value)} onBlur={(e) => commitName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} maxLength={24} spellCheck={false} />
           </label>
+          <button className="btn" onClick={() => setSettingsOpen(true)}>Settings</button>
           <button className="btn hot" onClick={() => setInvite(true)}>Invite an agent</button>
           <a className="btn" href={`/api/rooms/${roomId}/board?format=png&scale=${m ? Math.max(1, Math.floor(1024 / Math.max(m.w, m.h))) : 8}`} download={`${roomId}.png`}>PNG</a>
         </div>
@@ -832,23 +938,46 @@ export default function Room({ roomId }: { roomId: string }) {
             <div className="size" title="Brush size ([ and ])">
               <button onClick={() => setSize((s) => Math.max(1, s - 1))} aria-label="Smaller brush">-</button>
               <span className="num">{size}</span>
-              <button onClick={() => setSize((s) => Math.min(8, s + 1))} aria-label="Bigger brush">+</button>
+              <button onClick={() => setSize((s) => Math.min(16, s + 1))} aria-label="Bigger brush">+</button>
             </div>
             <button onClick={fit} title="Fit to screen (0)" aria-label="Fit to screen"><svg viewBox="0 0 24 24" aria-hidden><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></svg></button>
           </nav>
 
           <div className="palette" aria-label="Colors">
-            <div className="current" style={{ background: tool === "eraser" ? "transparent" : color }} title={tool === "eraser" ? "Eraser" : color} />
+            <div className="duo" title="Left click color, right click color. Press X to swap.">
+              <button className="c2" style={{ background: color2 }} onClick={() => { const a = color; setColor(color2); setColor2(a); setPref("color2", a); }} aria-label={`Second color ${color2}, click to swap`} />
+              <div className="current" style={{ background: tool === "eraser" ? "transparent" : color }} title={tool === "eraser" ? "Eraser" : color} />
+            </div>
             <div className="swatches">
               {palette.map((p, i) => (
-                <button key={p + i} style={{ background: p }} className={color === p && tool !== "eraser" ? "on" : ""} title={`${p} (slot ${ALPHABET[i]})`}
-                  onClick={() => { setColor(p); if (tool === "eraser" || tool === "picker" || tool === "pan") setTool("pencil"); }} aria-label={`Color ${p}`} />
+                <button key={p + i} style={{ background: p }} className={color === p && tool !== "eraser" ? "on" : ""} title={`${p}: click for the main color, right click for the second color`}
+                  onClick={() => { setColor(p); if (tool === "eraser" || tool === "picker" || tool === "pan") setTool("pencil"); }}
+                  onContextMenu={(e) => { e.preventDefault(); setColor2(p); setPref("color2", p); }} aria-label={`Color ${p}`} />
               ))}
             </div>
-            <label className="custom" title="Any color: new colors are added to this room's palette (max 62)">
-              <input type="color" value={normHex(color) ?? "#ff3d5a"} onChange={(e) => { setColor(e.target.value); if (tool === "eraser") setTool("pencil"); }} />
-              <span className="num">{color}</span>
-            </label>
+            <div className="mixer">
+              <label className="custom" title="Any color. New colors join this room's palette (max 62).">
+                <input type="color" value={normHex(color) ?? "#ff3d5a"} onChange={(e) => { setColor(e.target.value); if (tool === "eraser") setTool("pencil"); }} onBlur={(e) => rememberColor(e.target.value)} />
+                <span className="num">{color}</span>
+              </label>
+              <button className="btn ghost small" onClick={eyedrop} title="Pick any color on your screen">Eyedropper</button>
+              {recent.length > 0 && (
+                <div className="recent" aria-label="Recent colors">{recent.map((c) => (
+                  <button key={c} style={{ background: c }} title={c} onClick={() => { setColor(c); if (tool === "eraser") setTool("pencil"); }}
+                    onContextMenu={(e) => { e.preventDefault(); setColor2(c); setPref("color2", c); }} aria-label={`Recent color ${c}`} />
+                ))}</div>
+              )}
+            </div>
+            <div className="brush">
+              <label title="Brush size ([ and ])">Brush <input type="range" min={1} max={16} value={size} onChange={(e) => setSize(Number(e.target.value))} /> <span className="num">{size}</span></label>
+              <label title="What the right mouse button does">Right click
+                <select value={rightMode} onChange={(e) => { const v = e.target.value as typeof rightMode; setRightMode(v); setPref("right", v); }}>
+                  <option value="erase">erases</option>
+                  <option value="secondary">paints 2nd color</option>
+                  <option value="pick">picks a color</option>
+                </select>
+              </label>
+            </div>
           </div>
         </section>
 
@@ -856,26 +985,7 @@ export default function Room({ roomId }: { roomId: string }) {
           {m?.theme && <p className="theme">{m.theme}</p>}
 
           {m?.mode === "guess" && (
-            <div className="panel game">
-              {game?.status === "active" ? (
-                <>
-                  <div className="game-row">
-                    <span>{game.drawer === myName ? "You are drawing" : `${game.drawer} is drawing`}</span>
-                    <span className="num big">{roundLeft}s</span>
-                  </div>
-                  {game.word ? <p className="secret">Your word: <b>{game.word}</b></p> : <p className="hint num">{game.hint}</p>}
-                  {(game.drawer === myName || roundLeft === 0) && <button className="btn" onClick={() => gameAction("skip")}>End round</button>}
-                </>
-              ) : (
-                <>
-                  <p>{game?.lastWord ? `Last word: ${game.lastWord}${game.lastWinner ? `, guessed by ${game.lastWinner}` : ", nobody got it"}.` : "Nobody is drawing yet."}</p>
-                  <button className="btn hot" onClick={() => gameAction("start")}>Draw the next word</button>
-                </>
-              )}
-              {!!game?.scores?.length && (
-                <ol className="scores">{game.scores.map((s) => <li key={s.name}><span>{s.name}</span><span className="num">{s.score}</span></li>)}</ol>
-              )}
-            </div>
+            <GamePanel roomId={roomId} game={game} myName={myName} now={now} refresh={refreshGame} flash={flash} feedback={feedback} setFeedback={setFeedback} />
           )}
 
           {m?.mode === "life" && (
@@ -886,47 +996,7 @@ export default function Room({ roomId }: { roomId: string }) {
             </div>
           )}
 
-          <div className="tabs" role="tablist">
-            <button role="tab" aria-selected={railTab === "chat"} onClick={() => setRailTab("chat")}>Chat</button>
-            <button role="tab" aria-selected={railTab === "people"} onClick={() => setRailTab("people")}>Here now <span className="num">{presence.length}</span></button>
-            {railTab === "chat" && (
-              <label className="toggle"><input type="checkbox" checked={showDraws} onChange={(e) => setShowDraws(e.target.checked)} /> show strokes</label>
-            )}
-          </div>
-
-          {railTab === "people" ? (
-            <ul className="people">
-              {presence.length === 0 && <li className="empty">Nobody else yet. Invite an agent to get things moving.</li>}
-              {presence.map((p) => (
-                <li key={p.name} className={p.kind}>
-                  <span className="who">{p.name}{p.name === myName ? " (you)" : ""}</span>
-                  <span className="kind">{p.kind === "agent" ? "agent" : "human"}</span>
-                  {p.status && <span className="status">{p.status}</span>}
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <div className="log-wrap">
-            <div className="log" aria-live="polite" ref={logBox} onScroll={onLogScroll}>
-              {visibleLog.length === 0 && <p className="empty">No messages yet. Say hi, or press Enter to start typing.</p>}
-              {visibleLog.map((l) => (
-                <div key={l.key} className={`entry ${l.kind}`}>
-                  {l.actor && (l.kind === "chat" || l.kind === "draw") && <span className={`who ${l.actorKind}`}>{l.actor}</span>}
-                  <span className="text">{l.text}</span>
-                </div>
-              ))}
-            </div>
-            {unread > 0 && (
-              <button className="jump" onClick={toBottom}>{unread === 1 ? "1 new message" : `${unread} new messages`}</button>
-            )}
-            </div>
-          )}
-
-          <form className="say" onSubmit={sendChat}>
-            <input id="chat-input" value={chat} onChange={(e) => setChat(e.target.value)} maxLength={280}
-              placeholder={m?.mode === "guess" && game?.status === "active" && game.drawer !== myName ? "Type your guess" : "Say something"} autoComplete="off" />
-            <button className="btn" type="submit">Send</button>
-          </form>
+          {(!chatFloat || narrow) && chatBlock}
 
           {m && m.mode !== "place" && m.mode !== "guess" && (
             <button className="btn ghost danger" onClick={clearBoard}>Erase board</button>
@@ -934,6 +1004,18 @@ export default function Room({ roomId }: { roomId: string }) {
         </aside>
       </div>
 
+      {chatFloat && !narrow && (
+        <div className="float-chat" style={{ left: floatBox.x, top: floatBox.y, width: floatBox.w, height: floatBox.h }}
+          onPointerUp={(e) => { const el = e.currentTarget; if (el.offsetWidth !== floatBox.w || el.offsetHeight !== floatBox.h) { const b = { ...floatBox, w: el.offsetWidth, h: el.offsetHeight }; setFloatBox(b); setPref("floatBox", JSON.stringify(b)); } }}>
+          <div className="float-head" onPointerDown={startDrag}>
+            <span>Chat</span>
+            <button className="btn ghost" onPointerDown={(e) => e.stopPropagation()} onClick={() => dockChat(false)}>Dock to the side</button>
+          </div>
+          {chatBlock}
+        </div>
+      )}
+
+      {settingsOpen && m && <SettingsModal roomId={m.id} mode={m.mode} title={m.title} theme={m.theme} onClose={() => setSettingsOpen(false)} flash={flash} />}
       {invite && m && <InviteAgent room={m.id} title={m.title} onClose={() => setInvite(false)} />}
     </div>
   );

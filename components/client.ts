@@ -35,11 +35,11 @@ export class ApiError extends Error {
   constructor(public status: number, public code: string, message: string, public retryMs?: number) { super(message); }
 }
 
-export async function api<T = Record<string, unknown>>(path: string, init: { method?: string; body?: unknown; keepalive?: boolean } = {}): Promise<T> {
+export async function api<T = Record<string, unknown>>(path: string, init: { method?: string; body?: unknown; keepalive?: boolean; headers?: Record<string, string> } = {}): Promise<T> {
   const id = getIdentity();
   const res = await fetch(path, {
     method: init.method ?? (init.body !== undefined ? "POST" : "GET"),
-    headers: { "content-type": "application/json", "x-wb-name": id.name, "x-wb-token": id.token, "x-wb-kind": "human" },
+    headers: { "content-type": "application/json", "x-wb-name": id.name, "x-wb-token": id.token, "x-wb-kind": "human", ...(init.headers ?? {}) },
     body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
     keepalive: init.keepalive,
     cache: "no-store",
@@ -52,3 +52,17 @@ export async function api<T = Record<string, unknown>>(path: string, init: { met
 export function nonce() {
   return "ui-" + Date.now().toString(36) + "-" + rand(10);
 }
+
+// Room owner keys and the admin key live only in this browser.
+export const ownerKeyFor = (room: string) => safeGet(`wb.owner.${room}`) ?? "";
+export const saveOwnerKey = (room: string, key: string) => safeSet(`wb.owner.${room}`, key);
+export const adminKey = () => safeGet("wb.admin") ?? "";
+export const saveAdminKey = (key: string) => safeSet("wb.admin", key);
+export const ownerHeaders = (room: string): Record<string, string> => {
+  const h: Record<string, string> = {};
+  const o = ownerKeyFor(room); if (o) h["x-wb-owner"] = o;
+  const a = adminKey(); if (a) h["x-wb-admin"] = a;
+  return h;
+};
+export const pref = (k: string, d: string) => safeGet(`wb.pref.${k}`) ?? d;
+export const setPref = (k: string, v: string) => safeSet(`wb.pref.${k}`, v);

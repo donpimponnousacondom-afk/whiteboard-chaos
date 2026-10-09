@@ -3,13 +3,15 @@
 // ordering and fan-out live in exactly one place (same rule as v1's
 // wb_apply_cell()).
 import seedV1 from "../seed/chaos-live-grid.json";
-import { endRoundIfExpired, gameGuard, handleChatForGame, startRound, skipRound, gameView } from "./game";
+import { checkGuess, endRoundIfExpired, gameGuard, gameView, pickWord, skipRound, startRound } from "./game";
 import { HttpError } from "./http";
 import { sha } from "./identity";
 import { ALPHABET, DEFAULT_PALETTE, EMPTY, MAX_COLORS, normHex } from "./palette";
 import { applyOps, BULK_OPS, collectHexes, DRAW_OPS, Op, OpError } from "./raster";
 import { getStore, nonceKey, NONCE_TTL_MS } from "./store";
-import type { Actor, Mode, RoomMeta, WbEvent } from "./types";
+import { randomBytes } from "node:crypto";
+import { DEFAULT_SETTINGS, mergeSettings, roomSettings } from "./settings";
+import type { Actor, Mode, RoomMeta, RoomSettings, WbEvent } from "./types";
 
 export const ROOM_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 export const MODES: Mode[] = ["free", "place", "guess", "life"];
@@ -17,6 +19,8 @@ export const MAX_SIDE = 256;
 export const MAX_OPS = 500;
 
 interface Preset extends Partial<RoomMeta> { title: string; w: number; h: number; mode: Mode; seed?: () => string }
+
+const PRESET_V = 2;
 
 export const PRESETS: Record<string, Preset> = {
   chaos: {
@@ -26,7 +30,7 @@ export const PRESETS: Record<string, Preset> = {
   },
   lobby: { title: "Lobby", w: 64, h: 64, mode: "free", theme: "The big shared wall. Say hi in chat, draw something, leave space for others." },
   place: { title: "Place", w: 128, h: 96, mode: "place", cooldownMs: 2000, theme: "One pixel every 2 seconds per player. Cooperate, conquer, or defend your art." },
-  pictionary: { title: "Pictionary", w: 32, h: 32, mode: "guess", theme: "Start a round: you get a secret word to draw. Everyone else guesses in chat. Guesser +2, drawer +1." },
+  pictionary: { title: "Pictionary", w: 32, h: 32, mode: "guess", theme: "Press Draw the next word: you pick 1 of 3 secret words and draw it. Everyone else guesses in the private guess box. Faster guesses score more, and the drawer scores for every correct guess." },
   life: { title: "Life", w: 48, h: 48, mode: "life", theme: "Paint cells, then step Conway's Game of Life. Newborn cells take the most common neighbour color, so colonies compete." },
 };
 
@@ -48,8 +52,9 @@ function modeDefaults(mode: Mode, cooldownMs?: number) {
 }
 
 export function publicMeta(m: RoomMeta) {
-  const { keyHash, ...rest } = m;
-  return { ...rest, locked: !!keyHash };
+  const { keyHash, ownerKeyHash, settings, ...rest } = m;
+  void ownerKeyHash; void settings;
+  return { ...rest, locked: !!keyHash, settings: publicSettings(m) };
 }
 
 // --- meta cache (per instance, short) -------------------------------------
@@ -61,6 +66,11 @@ export async function getRoom(id: string): Promise<RoomMeta> {
   if (c && c.until > Date.now()) return c.meta;
   let meta = await getStore().getMeta(id);
   if (!meta && PRESETS[id]) meta = await createPreset(id);
+  // built-in rooms pick up new default texts once per preset version
+  if (meta?.system && PRESETS[id] && (meta as RoomMeta & { presetV?: number }).presetV !== PRESET_V) {
+    meta = { ...meta, title: PRESETS[id].title, theme: PRESETS[id].theme ?? meta.theme, presetV: PRESET_V } as RoomMeta;
+    await getStore().putMeta(meta);
+  }
   if (!meta) throw new HttpError(404, "room_not_found", `room '${id}' does not exist. Create it with POST /api/rooms`);
   metaCache.set(id, { meta, until: Date.now() + 3000 });
   return meta;
@@ -90,9 +100,10 @@ export async function ensurePresets() {
 export interface CreateInput {
   id?: unknown; title?: unknown; theme?: unknown; w?: unknown; h?: unknown; size?: unknown;
   mode?: unknown; palette?: unknown; key?: unknown; cooldownMs?: unknown; bg?: unknown;
+  settings?: unknown; game?: unknown;
 }
 
-export async function createRoom(input: CreateInput, actor: Actor): Promise<RoomMeta> {
+export async function createRoom(input: CreateInput, actor: Actor): Promise<RoomMeta & { ownerKey: string }> {
   const store = getStore();
   const id = String(input.id ?? "").toLowerCase().trim() || randomId();
   if (!ROOM_RE.test(id)) throw new HttpError(400, "bad_room", "room id must match [a-z0-9][a-z0-9-]{0,31}");
@@ -118,6 +129,9 @@ export async function createRoom(input: CreateInput, actor: Actor): Promise<Room
     palette = [...new Set(p as string[])];
   }
   const bg = normHex(String(input.bg ?? "#0d0d14")) ?? "#0d0d14";
+  const patch = { ...((input.settings as Record<string, unknown>) ?? {}), ...(input.game ? { game: input.game } : {}) };
+  const settings = mergeSettings(DEFAULT_SETTINGS, patch);
+  const ownerKey = "own_" + randomBytes(18).toString("base64url");
   const meta: RoomMeta = {
     id,
     title: String(input.title ?? id).slice(0, 60),
@@ -127,6 +141,8 @@ export async function createRoom(input: CreateInput, actor: Actor): Promise<Room
     keyHash: input.key ? sha(String(input.key)) : "",
     createdAt: Date.now(),
     createdBy: actor.name,
+    ownerKeyHash: sha(ownerKey),
+    settings,
   };
   if (!(await store.createMeta(meta, palette))) throw new HttpError(409, "room_exists", `room '${id}' already exists`);
   await store.commit(id, {
@@ -134,7 +150,35 @@ export async function createRoom(input: CreateInput, actor: Actor): Promise<Room
     cost: 0, burst: 1, refillPerSec: 1, allowDebt: true, bucket: "system",
   });
   metaCache.delete(id);
-  return meta;
+  return { ...meta, ownerKey };
+}
+
+// Owner = holder of the owner key returned at creation, or the server admin.
+export function isOwner(meta: RoomMeta, ownerKey: string | null, adminKey: string | null): boolean {
+  if (adminKey && process.env.WB_ADMIN_KEY && adminKey === process.env.WB_ADMIN_KEY) return true;
+  return !!ownerKey && !!meta.ownerKeyHash && sha(ownerKey) === meta.ownerKeyHash;
+}
+
+export async function updateSettings(id: string, patch: Record<string, unknown>, actor: Actor, ownerKey: string | null, adminKey: string | null) {
+  const meta = await getStore().getMeta(id) ?? await getRoom(id);
+  if (!isOwner(meta, ownerKey, adminKey)) {
+    throw new HttpError(401, "not_owner", meta.ownerKeyHash
+      ? "only the room owner can change settings (send X-WB-Owner with the owner key from room creation, or X-WB-Admin)"
+      : "this built-in room is managed by the server admin (send X-WB-Admin)");
+  }
+  const next: RoomMeta = { ...meta, settings: mergeSettings(roomSettings(meta), patch) };
+  if (typeof patch.title === "string") next.title = patch.title.slice(0, 60);
+  if (typeof patch.theme === "string") next.theme = patch.theme.slice(0, 500);
+  await getStore().putMeta(next);
+  metaCache.delete(id);
+  await commitEvent(next, actor, { kind: "meta", title: next.title, theme: next.theme, settings: publicSettings(next), text: "room settings changed" });
+  return next;
+}
+
+export function publicSettings(meta: RoomMeta): RoomSettings {
+  const s = roomSettings(meta);
+  // the custom word list is the room's answer sheet: show only its size
+  return { ...s, game: { ...s.game, custom: [] , ...( { customCount: s.game.custom.length } as object) } } as RoomSettings;
 }
 
 export async function updateRoom(id: string, patch: { title?: unknown; theme?: unknown; key?: unknown }, actor: Actor, key: string | null) {
@@ -158,6 +202,17 @@ function randomId() {
 export function checkKey(meta: RoomMeta, key: string | null) {
   if (!meta.keyHash) return;
   if (!key || sha(key) !== meta.keyHash) throw new HttpError(401, "unauthorized", "this room needs a write key (X-WB-Key header or 'key' field)");
+}
+
+// Owner-configured slowmode: one action of this type per `sec` seconds per name.
+async function slowmode(meta: RoomMeta, actor: Actor, what: "chat" | "guess", sec: number) {
+  if (!sec) return;
+  const ms = Math.round(sec * 1000);
+  const ok = await getStore().kvSet(`wb:{${meta.id}}:slow:${what}:${actor.name}`, String(Date.now() + ms), ms, true);
+  if (!ok) {
+    const until = Number(await getStore().kvGet(`wb:{${meta.id}}:slow:${what}:${actor.name}`)) || Date.now() + ms;
+    throw new HttpError(429, "slowmode", `slowmode: one ${what} every ${sec} s in this room`, { retryMs: Math.max(100, until - Date.now()) });
+  }
 }
 
 // A lost publish only delays live viewers (feeds repair gaps from the stream),
@@ -211,8 +266,8 @@ export async function act(roomId: string, actor: Actor, input: ActInput, key: st
   const drawOps = ops.filter((o) => DRAW_OPS.includes(String(o?.op))) as Op[];
   const otherOps = ops.filter((o) => !DRAW_OPS.includes(String(o?.op)));
   for (const o of otherOps) {
-    if (!["chat", "game", "status"].includes(String(o?.op))) {
-      throw new HttpError(400, "unknown_op", `unknown op '${o?.op}'. Draw ops: ${DRAW_OPS.join(", ")}. Other ops: chat, game, status`);
+    if (!["chat", "game", "status", "guess"].includes(String(o?.op))) {
+      throw new HttpError(400, "unknown_op", `unknown op '${o?.op}'. Draw ops: ${DRAW_OPS.join(", ")}. Other ops: chat, guess, game, status`);
     }
   }
 
@@ -315,19 +370,31 @@ export async function act(roomId: string, actor: Actor, input: ActInput, key: st
 
   // ---- chat / game / status -----------------------------------------------
   for (const o of otherOps) {
-    if (o.op === "chat") {
-      const textIn = String((o as { text?: unknown }).text ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 280);
-      if (!textIn) throw new HttpError(400, "empty_chat", "chat.text is empty");
+    if (o.op === "chat" || o.op === "guess") {
+      const textIn = String((o as { text?: unknown; word?: unknown }).text ?? (o as { word?: unknown }).word ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 280);
+      if (!textIn) throw new HttpError(400, "empty_text", `${o.op}.text is empty`);
+      const cfg = roomSettings(meta);
+      if (o.op === "guess") {
+        // private guess: never shown to anyone, answered only to the caller
+        if (meta.mode !== "guess") throw new HttpError(400, "not_a_game_room", "guess only works in rooms with mode 'guess'");
+        await slowmode(meta, actor, "guess", cfg.guessSlowSec[actor.kind]);
+        const r = await checkGuess(meta, actor, textIn, false);
+        results.push({ op: "guess", ...r });
+        continue;
+      }
+      await slowmode(meta, actor, "chat", cfg.chatSlowSec[actor.kind]);
       const burst = await store.kvIncr(`wb:{${meta.id}}:chat:${actor.name}`, 10000);
       if (burst > 15) throw new HttpError(429, "chat_flood", "max 15 chat messages per 10 s", { retryMs: 3000 });
       const ipBurst = await store.kvIncr(`wb:{${meta.id}}:chatip:${actor.ip}`, 10000);
       const ipMax = 15 * Math.max(1, Number(process.env.WB_IP_MULT ?? 8));
       if (ipBurst > ipMax) throw new HttpError(429, "chat_flood", `too many chat messages from your network (${ipMax} per 10 s)`, { retryMs: 3000 });
-      const g = meta.mode === "guess" ? await handleChatForGame(meta, actor, textIn) : null;
-      if (g?.swallowed) { results.push({ op: "chat", ...g.result }); seq = g.seq ?? seq; continue; }
+      // in a running round, a chat line that hits or nearly hits the word is
+      // treated as a private guess, so it never leaks the answer to the room
+      const g = meta.mode === "guess" ? await checkGuess(meta, actor, textIn, true) : null;
+      if (g) { results.push({ op: "chat", swallowed: true, ...g }); continue; }
       const res = await commitEvent(meta, actor, { kind: "chat", text: textIn }, { nonce: nextNonce() });
       if (res.status === "ok") seq = res.seq;
-      results.push({ op: "chat", ok: true, ...(g?.result ?? {}) });
+      results.push({ op: "chat", ok: true });
     } else if (o.op === "status") {
       const status = String((o as { text?: unknown }).text ?? "").slice(0, 80);
       await store.presencePut(meta.id, { name: actor.name, kind: actor.kind, t: Date.now(), status });
@@ -337,6 +404,11 @@ export async function act(roomId: string, actor: Actor, input: ActInput, key: st
       const action = String((o as { action?: unknown }).action ?? "status");
       if (meta.mode !== "guess") throw new HttpError(400, "not_a_game_room", "game ops only work in rooms with mode 'guess'");
       if (action === "start") results.push({ op: "game", ...(await startRound(meta, actor)) });
+      else if (action === "pick") results.push({ op: "game", ...(await pickWord(meta, actor, (o as { word?: unknown }).word)) });
+      else if (action === "guess") {
+        await slowmode(meta, actor, "guess", roomSettings(meta).guessSlowSec[actor.kind]);
+        results.push({ op: "game", ...(await checkGuess(meta, actor, String((o as { word?: unknown }).word ?? ""), false)) });
+      }
       else if (action === "skip") results.push({ op: "game", ...(await skipRound(meta, actor)) });
       else results.push({ op: "game", ...(await gameView(meta, actor)) });
     }

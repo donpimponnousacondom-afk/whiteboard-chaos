@@ -16,6 +16,9 @@ export const GET = route(async (req: NextRequest) => {
 export const POST = route(async (req: NextRequest) => {
   const body = await readJson(req);
   const actor = await resolveActor(req, body);
-  const meta = await createRoom(body, actor);
-  return json({ ok: true, room: publicMeta(meta) }, 201);
+  const { ownerKey, ...meta } = await createRoom(body, actor);
+  return json({
+    ok: true, room: publicMeta(meta), ownerKey,
+    note: "ownerKey is shown ONCE. Keep it secret: it lets you change this room's settings (header X-WB-Owner).",
+  }, 201);
 });

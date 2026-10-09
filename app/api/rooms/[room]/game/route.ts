@@ -17,6 +17,6 @@ export const POST = route<P>(async (req: NextRequest, { room }) => {
   const body = await readJson(req);
   const actor = await resolveActor(req, body);
   const action = String(body.action ?? "status");
-  const r = await act(room, actor, { ops: [{ op: "game", action }] }, req.headers.get("x-wb-key"));
+  const r = await act(room, actor, { ops: [{ op: "game", action, word: body.word }] }, req.headers.get("x-wb-key"));
   return json(r.results[0] ?? { ok: true });
 });

@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { api } from "./client";
+import { api, saveOwnerKey } from "./client";
+import WordBag, { bagToGame, DEFAULT_BAG, type BagValue } from "./WordBag";
 
 interface RoomRow { id: string; title: string; theme: string; w: number; h: number; mode: string; seq: number; active: number; locked: boolean }
 
@@ -29,6 +30,7 @@ export default function Lobby() {
   const [form, setForm] = useState({ id: "", title: "", theme: "", size: "64x64", mode: "free", key: "" });
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [bag, setBag] = useState<BagValue>(DEFAULT_BAG);
   const [origin, setOrigin] = useState("");
 
   useEffect(() => {
@@ -46,10 +48,15 @@ export default function Lobby() {
     setBusy(true); setErr(null);
     const [w, h] = form.size.split("x").map(Number);
     try {
-      const r = await api<{ room: RoomRow }>("/api/rooms", {
-        body: { id: form.id || undefined, title: form.title || undefined, theme: form.theme || undefined, w, h, mode: form.mode, key: form.key || undefined },
+      const r = await api<{ room: RoomRow; ownerKey: string }>("/api/rooms", {
+        body: {
+          id: form.id || undefined, title: form.title || undefined, theme: form.theme || undefined, w, h, mode: form.mode, key: form.key || undefined,
+          ...(form.mode === "guess" ? { game: bagToGame(bag) } : {}),
+        },
       });
-      router.push(`/r/${r.room.id}`);
+      // the owner key unlocks this room's settings; it lives in this browser
+      saveOwnerKey(r.room.id, r.ownerKey);
+      router.push(`/r/${r.room.id}?owner=1`);
     } catch (e2) {
       setErr((e2 as Error).message);
       setBusy(false);
@@ -113,6 +120,7 @@ export default function Lobby() {
             <div className="chips">{MODES.map((m) => <button type="button" key={m.id} aria-pressed={form.mode === m.id} onClick={() => setForm({ ...form, mode: m.id })} title={m.help}>{m.label}</button>)}</div>
             <p className="help">{MODES.find((m) => m.id === form.mode)?.help}</p>
           </fieldset>
+          {form.mode === "guess" && <div className="wide"><WordBag value={bag} onChange={setBag} /></div>}
           <label>Write key <input value={form.key} onChange={(e) => setForm({ ...form, key: e.target.value })} placeholder="optional: only people with it can draw" /></label>
           <div className="submit">
             {err && <p className="error" role="alert">{err}</p>}

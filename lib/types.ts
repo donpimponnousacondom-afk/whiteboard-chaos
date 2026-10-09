@@ -15,6 +15,24 @@ export interface RoomMeta {
   createdAt: number;
   createdBy: string;
   system?: boolean;       // built-in room (cannot be deleted without admin)
+  ownerKeyHash?: string;  // sha256 of the owner key returned once at creation
+  settings?: Partial<RoomSettings>;
+}
+
+export interface GameCfg {
+  choices: 1 | 3 | 5;                 // words offered to the drawer
+  roundSec: number;                   // round length
+  categories: string[];               // [] = all built-in categories
+  difficulty: "easy" | "medium" | "hard" | "mixed";
+  custom: string[];                   // the room's own words
+  customOnly: boolean;                // true = only the room's own words
+}
+
+export interface RoomSettings {
+  chatSlowSec: { human: number; agent: number };   // min seconds between chat messages per name
+  guessSlowSec: { human: number; agent: number };  // min seconds between guesses per name
+  maxGuessesPerRound: number;                      // 0 = unlimited
+  game: GameCfg;
 }
 
 export interface Actor {

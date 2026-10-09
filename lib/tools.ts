@@ -27,9 +27,10 @@ export const OPS_DOC = `Ops (coordinates are cells, x = column from left, y = ro
   {op:"shift", dx?, dy?}                     scroll the board with wraparound (animation!)
   {op:"mirror", axis:"x"|"y"}                copy left->right (x) or top->bottom (y)
   {op:"noise", density?, colors?, x?,y?,w?,h?}  random sprinkle
-  {op:"chat", text}                          say something (in guess rooms: your guess)
+  {op:"chat", text}                          say something to the room
+  {op:"guess", text}                         pictionary guess, PRIVATE: only you see the answer (right, close, nope)
   {op:"status", text}                        set your presence status line
-  {op:"game", action:"start"|"skip"|"status"} pictionary control (mode=guess rooms)
+  {op:"game", action:"start"|"pick"|"skip"|"status", word?} pictionary control (mode=guess rooms); pick takes a word or its number
 Colors c: "#rrggbb" | "#rgb" | name (red, blue, gold, ...) | palette char "0".."9","a".."z","A".."Z" | palette index number | null or "." to erase.
 New hex colors are added to the room palette (max 62), then snapped to the nearest color.`;
 
@@ -98,8 +99,8 @@ export const TOOL_DEFS = [
   },
   {
     name: "wb_game",
-    description: "Pictionary control for mode=guess rooms. status: round/hint/scores. start: you become the drawer and receive the secret word (only you). skip: end your round.",
-    input_schema: { type: "object", properties: { room: roomProp, action: { type: "string", enum: ["status", "start", "skip"] } }, required: ["room"] },
+    description: "Pictionary for mode=guess rooms. status: round, hint, scores (and your options or word if you draw). start: you become the drawer and get 1, 3 or 5 secret words. pick: choose one (word or number). guess: a PRIVATE guess, only you see the result. skip: end your round.",
+    input_schema: { type: "object", properties: { room: roomProp, action: { type: "string", enum: ["status", "start", "pick", "guess", "skip"] }, word: { type: "string", description: "for pick (word or 1-based number) and guess" } }, required: ["room"] },
   },
   {
     name: "wb_whoami",
@@ -227,12 +228,12 @@ async function dispatch(name: string, a: Record<string, unknown>, actor: Actor, 
         const v = await gameView(meta, actor);
         return txt(JSON.stringify(v, null, 1), v as Record<string, unknown>);
       }
-      const r = await act(meta.id, actor, { ops: [{ op: "game", action }] }, null);
+      const r = await act(meta.id, actor, { ops: [{ op: "game", action, word: a.word }] }, null);
       return txt(JSON.stringify(r.results[0], null, 1), r.results[0]);
     }
     case "wb_create_room": {
-      const meta = await createRoom(a, actor);
-      return txt(`created room ${meta.id} ${meta.w}x${meta.h} mode=${meta.mode}`, publicMeta(meta));
+      const { ownerKey, ...meta } = await createRoom(a, actor);
+      return txt(`created room ${meta.id} ${meta.w}x${meta.h} mode=${meta.mode}. Owner key (shown once, keep it secret, needed to change settings): ${ownerKey}`, { ...publicMeta(meta), ownerKey });
     }
     default:
       throw new HttpError(404, "unknown_tool", `unknown tool ${name}`);
