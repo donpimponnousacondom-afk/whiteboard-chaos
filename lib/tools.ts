@@ -5,7 +5,7 @@ import { gameView } from "./game";
 import { HttpError } from "./http";
 import { DEFAULT_PALETTE } from "./palette";
 import { clampRegion, renderPng, renderText } from "./render";
-import { act, commitEvent, createRoom, getRoom, isOwner, MODES, publicMeta, publicSettings, updateSettings } from "./rooms";
+import { act, commitEvent, createRoom, getRoom, isOwner, MODES, openRoom, publicMeta, publicSettings, updateSettings } from "./rooms";
 import { roomSettings } from "./settings";
 import { CATEGORIES } from "./words";
 import { getStore } from "./store";
@@ -210,13 +210,13 @@ async function dispatch(name: string, a: Record<string, unknown>, actor: Actor, 
   const store = getStore();
   switch (name) {
     case "wb_rooms": {
-      const rooms = await store.listRooms(50);
+      const rooms = (await store.listRooms(50)).filter((r) => actor.admin || !r.meta.closed);
       const lines = rooms.map(({ meta, active, seq }) =>
         `- ${meta.id}: "${meta.title}" ${meta.w}x${meta.h} mode=${meta.mode}${meta.keyHash ? " locked" : ""} seq=${seq} active=${new Date(active).toISOString()}${meta.theme ? `\n    theme: ${meta.theme}` : ""}`);
       return txt(`you are "${actor.name}". rooms:\n${lines.join("\n")}`, { rooms: rooms.map((r) => ({ ...publicMeta(r.meta), seq: r.seq, active: r.active })) });
     }
     case "wb_look": {
-      const meta = await getRoom(String(a.room));
+      const meta = await openRoom(String(a.room), actor.admin);
       const snap = await store.snapshot(meta.id, meta.w * meta.h);
       const reg = clampRegion({ x: a.x as number, y: a.y as number, w: a.w as number, h: a.h as number }, meta.w, meta.h);
       const format = String(a.format ?? "text");
@@ -243,7 +243,7 @@ async function dispatch(name: string, a: Record<string, unknown>, actor: Actor, 
       return txt(`sent. seq=${r.seq} ${JSON.stringify(r.results[0] ?? {})}`, r as unknown as Record<string, unknown>);
     }
     case "wb_wait": {
-      const meta = await getRoom(String(a.room));
+      const meta = await openRoom(String(a.room), actor.admin);
       const since = a.since === undefined || a.since === null ? null : Number(a.since);
       if (since !== null && (!Number.isInteger(since) || since < 0)) throw new HttpError(400, "bad_since", "since must be a non-negative integer seq");
       const timeout = Math.max(1, Math.min(25, Number(a.timeout ?? 20))) * 1000;
@@ -254,12 +254,12 @@ async function dispatch(name: string, a: Record<string, unknown>, actor: Actor, 
       return txt(`${head}\n${lines.join("\n")}`, { seq: r.seq, resync: r.resync, count: r.events.length });
     }
     case "wb_who": {
-      const meta = await getRoom(String(a.room));
+      const meta = await openRoom(String(a.room), actor.admin);
       const ps = await store.presenceList(meta.id, 60000);
       return txt(ps.length ? ps.map((p) => `- ${p.name} (${p.kind})${p.status ? ` "${p.status}"` : ""}${p.x !== undefined ? ` cursor ${p.x},${p.y}` : ""} ${Math.round((Date.now() - p.t) / 1000)}s ago`).join("\n") : "nobody active in the last 60 s", { presence: ps });
     }
     case "wb_game": {
-      const meta = await getRoom(String(a.room));
+      const meta = await openRoom(String(a.room), actor.admin);
       const action = String(a.action ?? "status");
       if (action === "status") {
         const v = await gameView(meta, actor);

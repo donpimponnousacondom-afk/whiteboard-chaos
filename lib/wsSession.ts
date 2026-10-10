@@ -8,7 +8,9 @@
 //                     {"kind":"error","id":1,"error":"rate_limited","message":"..","retryMs":..}
 //                     {"kind":"pong"} | {"kind":"reconnect"} (then close 4000)
 import type { WebSocket } from "ws";
+import { BUILD } from "./build";
 import { openFeed } from "./feed";
+import { markConnected, markDisconnected } from "./members";
 import { HttpError } from "./http";
 import { act } from "./rooms";
 import { getStore } from "./store";
@@ -17,7 +19,9 @@ import type { Actor, RoomMeta } from "./types";
 export async function runWsSession(ws: WebSocket, meta: RoomMeta, actor: Actor, since: number | null, key: string | null, lifetimeMs: number) {
   const store = getStore();
   const send = (obj: unknown) => { if (ws.readyState === 1) ws.send(JSON.stringify(obj)); };
-  send({ kind: "hello", t: Date.now(), room: { id: meta.id, w: meta.w, h: meta.h, mode: meta.mode, title: meta.title }, you: actor.name, transport: "websocket" });
+  send({ kind: "hello", t: Date.now(), room: { id: meta.id, w: meta.w, h: meta.h, mode: meta.mode, title: meta.title }, you: actor.name, transport: "websocket", build: BUILD });
+  const opened = Date.now();
+  markConnected(meta, actor, "websocket").catch(() => {});
 
   let busy: Promise<void> = Promise.resolve(); // keep this client's writes in order
   let pending = 0;
@@ -26,7 +30,11 @@ export async function runWsSession(ws: WebSocket, meta: RoomMeta, actor: Actor, 
   let close = () => {};
   const timers: ReturnType<typeof setTimeout>[] = [];
   // register teardown FIRST: the client may vanish while the feed is being set up
-  ws.on("close", () => { closed = true; timers.forEach((t) => { clearTimeout(t); clearInterval(t); }); close(); });
+  let lifetimeEnd = false;
+  ws.on("close", () => {
+    closed = true; timers.forEach((t) => { clearTimeout(t); clearInterval(t); }); close();
+    if (!lifetimeEnd) markDisconnected(meta, actor, "websocket", Date.now() - opened).catch(() => {});
+  });
   ws.on("error", () => { /* close follows */ });
   ws.on("message", (raw) => {
     let msg: { type?: string; id?: unknown; ops?: unknown; nonce?: unknown; x?: unknown; y?: unknown; color?: unknown; status?: unknown };
@@ -70,5 +78,5 @@ export async function runWsSession(ws: WebSocket, meta: RoomMeta, actor: Actor, 
   store.presencePut(meta.id, { name: actor.name, kind: actor.kind, t: Date.now() }).catch(() => {});
   const ka = setInterval(() => { try { ws.ping(); } catch { /* closed */ } }, 25000);
   timers.push(ka as unknown as ReturnType<typeof setTimeout>);
-  timers.push(setTimeout(() => { send({ kind: "reconnect", t: Date.now() }); ws.close(4000, "reconnect"); }, lifetimeMs));
+  timers.push(setTimeout(() => { lifetimeEnd = true; send({ kind: "reconnect", t: Date.now() }); ws.close(4000, "reconnect"); }, lifetimeMs));
 }

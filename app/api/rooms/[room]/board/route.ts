@@ -2,13 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { HttpError, json, num, route, text } from "@/lib/http";
 import { ALPHABET, EMPTY } from "@/lib/palette";
 import { clampRegion, renderPng, renderText } from "@/lib/render";
-import { getRoom } from "@/lib/rooms";
+import { isAdminReq } from "@/lib/identity";
+import { openRoom } from "@/lib/rooms";
 import { getStore } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
 export const GET = route<{ room: string }>(async (req: NextRequest, { room }) => {
-  const meta = await getRoom(room);
+  const meta = await openRoom(room, isAdminReq(req));
   const q = req.nextUrl.searchParams;
   const snap = await getStore().snapshot(meta.id, meta.w * meta.h);
   const reg = clampRegion({ x: num(q.get("x")), y: num(q.get("y")), w: num(q.get("w")), h: num(q.get("h")) }, meta.w, meta.h);

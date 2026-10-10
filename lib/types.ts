@@ -16,6 +16,8 @@ export interface RoomMeta {
   createdBy: string;
   system?: boolean;       // built-in room (cannot be deleted without admin)
   ownerKeyHash?: string;  // sha256 of the owner key returned once at creation
+  closed?: boolean;       // admin closed the room: nobody but the admin can read or write
+  closedNote?: string;
   settings?: Partial<RoomSettings>;
 }
 
@@ -35,17 +37,29 @@ export interface RoomSettings {
   game: GameCfg;
 }
 
+export interface ClientInfo {
+  app: string;            // wb, browser, curl, python-urllib, mcp, ...
+  ver?: string;           // app version (wb CLI version, curl version, browser version)
+  rt?: string;            // runtime of the wb CLI: "python 3.14.0", "node 22.11.0"
+  label: string;          // short human label: "wb 4.0.0 python 3.14.0"
+  raw: boolean;           // true = not one of the official clients (wb, browser, MCP, tools)
+}
+
 export interface Actor {
   name: string;
   kind: "human" | "agent";
   ip: string;
+  client?: ClientInfo;
+  via?: "http" | "ws" | "mcp" | "tools" | "v1";
+  session?: string | null; // room session token (X-WB-Session), from POST /join
+  admin?: boolean;         // request carried the admin key
 }
 
 // Persisted events carry a seq. Ephemeral events (cursor, presence) do not.
 export interface WbEvent {
   seq?: number;
   t: number;
-  kind: "draw" | "chat" | "game" | "meta" | "system" | "cursor" | "presence" | "snapshot" | "reconnect";
+  kind: "draw" | "chat" | "game" | "meta" | "system" | "cursor" | "presence" | "snapshot" | "reconnect" | "member" | "kick";
   actor?: string;
   actorKind?: "human" | "agent";
   [k: string]: unknown;
@@ -60,7 +74,7 @@ export interface Snapshot {
 export type CommitResult =
   | { status: "ok"; seq: number }
   | { status: "dup"; seq: number }
-  | { status: "limited"; retryMs: number }
+  | { status: "limited"; retryMs: number; bucket?: "name" | "ip" }
   | { status: "conflict"; seq: number };
 
 export interface CommitReq {

@@ -3,6 +3,8 @@
 // ordering and fan-out live in exactly one place (same rule as v1's
 // wb_apply_cell()).
 import seedV1 from "../seed/chaos-live-grid.json";
+import { audit, fold, who } from "./audit";
+import { markActive, requireMember } from "./members";
 import { checkGuess, endRoundIfExpired, gameGuard, gameView, pickWord, skipRound, startRound } from "./game";
 import { HttpError } from "./http";
 import { sha } from "./identity";
@@ -54,7 +56,41 @@ function modeDefaults(mode: Mode, cooldownMs?: number) {
 export function publicMeta(m: RoomMeta) {
   const { keyHash, ownerKeyHash, settings, ...rest } = m;
   void ownerKeyHash; void settings;
-  return { ...rest, locked: !!keyHash, settings: publicSettings(m) };
+  return { ...rest, locked: !!keyHash, closed: !!m.closed, settings: publicSettings(m) };
+}
+
+// A closed room is invisible to everyone but the admin.
+export function assertOpen(meta: RoomMeta, admin: boolean | undefined) {
+  if (meta.closed && !admin) {
+    throw new HttpError(403, "room_closed", `room '${meta.id}' is closed by the admin${meta.closedNote ? `: ${meta.closedNote}` : ""}. Pick another room.`);
+  }
+}
+
+export async function openRoom(id: string, admin: boolean | undefined): Promise<RoomMeta> {
+  const meta = await getRoom(id);
+  assertOpen(meta, admin);
+  return meta;
+}
+
+// --- admin moderation -------------------------------------------------------
+export async function moderateRoom(id: string, patch: { closed?: boolean; note?: string; key?: string | null }, adminName = "admin") {
+  const meta = await getStore().getMeta(id) ?? await getRoom(id);
+  const next: RoomMeta = { ...meta };
+  const said: string[] = [];
+  if (patch.closed !== undefined) {
+    next.closed = patch.closed;
+    next.closedNote = patch.closed ? String(patch.note ?? "").slice(0, 120) : undefined;
+    said.push(patch.closed ? "closed the room" : "opened the room");
+  }
+  if (patch.key !== undefined) {
+    next.keyHash = patch.key ? sha(patch.key) : "";
+    said.push(patch.key ? "set a write password" : "removed the write password");
+  }
+  await getStore().putMeta(next);
+  metaCache.delete(id);
+  await audit({ type: "room", room: id, name: adminName, text: `admin ${said.join(", ")}` });
+  await commitEvent(next, null, { kind: "system", text: `the admin ${said.join(" and ")}` });
+  return next;
 }
 
 // --- meta cache (per instance, short) -------------------------------------
@@ -254,7 +290,9 @@ const NONCE_RE = /^[A-Za-z0-9._:-]{8,80}$/;
 export async function act(roomId: string, actor: Actor, input: ActInput, key: string | null): Promise<ActResult> {
   const store = getStore();
   const meta = await getRoom(roomId);
+  assertOpen(meta, actor.admin);
   checkKey(meta, key);
+  await requireMember(meta, actor);
   if (!Array.isArray(input.ops) || input.ops.length === 0) throw new HttpError(400, "bad_ops", "body must contain ops: [ {op: ...}, ... ]");
   if (input.ops.length > MAX_OPS) throw new HttpError(400, "too_many_ops", `max ${MAX_OPS} ops per request`);
   const nonce = input.nonce === undefined || input.nonce === null ? undefined : String(input.nonce);
@@ -356,7 +394,11 @@ export async function act(roomId: string, actor: Actor, input: ActInput, key: st
       commitIdx++;
       if (res.status === "dup") return { ok: true, duplicate: true, seq: res.seq, changed: 0, results: [{ op: "draw", duplicate: true }] };
       if (res.status === "limited") {
-        throw new HttpError(429, "rate_limited", `slow down: wait ${res.retryMs} ms (bucket ${meta.burst} px, refill ${Math.round(meta.refillPerSec * 100) / 100} px/s per name)`, { retryMs: res.retryMs });
+        const mult = Math.max(1, Number(process.env.WB_IP_MULT ?? 8));
+        const why = res.bucket === "ip"
+          ? `your NETWORK's shared pixel budget is empty: every name on your IP shares ${mult}x one player's budget (${meta.burst * mult} px, refill ${Math.round(meta.refillPerSec * mult)} px/s). Other agents on your machine are drawing too`
+          : `YOUR pixel budget is empty (${meta.burst} px, refill ${Math.round(meta.refillPerSec * 100) / 100} px/s per name)`;
+        throw new HttpError(429, "rate_limited", `slow down, wait ${res.retryMs} ms: ${why}. This limit is ours (the whiteboard server), not Vercel's.`, { retryMs: res.retryMs, bucket: res.bucket });
       }
       seq = res.seq;
       changed = r.changed.size;
@@ -364,6 +406,8 @@ export async function act(roomId: string, actor: Actor, input: ActInput, key: st
       store.touch(meta.id).catch(() => {});
       results.push({ op: "draw", ops: r.summary.length, changed: r.changed.size, touched: r.touched.size });
       done = true;
+      const f = fold(`draw:${meta.id}:${actor.name}`, 3000, r.touched.size);
+      if (f.emit) audit({ type: "draw", room: meta.id, ...who(actor), text: `drew ${f.px} px (${stored.ops}${f.n > 1 ? `, ${f.n} batches` : ""}) seq ${seq}` }).catch(() => {});
     }
     if (!done) throw new HttpError(409, "busy", "the board is changing too fast for this op; retry", { retryMs: 100 });
   }
@@ -380,6 +424,7 @@ export async function act(roomId: string, actor: Actor, input: ActInput, key: st
         await slowmode(meta, actor, "guess", cfg.guessSlowSec[actor.kind]);
         const r = await checkGuess(meta, actor, textIn, false);
         results.push({ op: "guess", ...r });
+        audit({ type: "guess", room: meta.id, ...who(actor), text: `guessed "${textIn.slice(0, 40)}": ${(r as { correct?: boolean }).correct ? "correct" : (r as { close?: boolean }).close ? "close" : "wrong"}` }).catch(() => {});
         continue;
       }
       await slowmode(meta, actor, "chat", cfg.chatSlowSec[actor.kind]);
@@ -403,19 +448,23 @@ export async function act(roomId: string, actor: Actor, input: ActInput, key: st
     } else if (o.op === "game") {
       const action = String((o as { action?: unknown }).action ?? "status");
       if (meta.mode !== "guess") throw new HttpError(400, "not_a_game_room", "game ops only work in rooms with mode 'guess'");
-      if (action === "start") results.push({ op: "game", ...(await startRound(meta, actor)) });
+      if (action === "start") { results.push({ op: "game", ...(await startRound(meta, actor)) }); audit({ type: "game", room: meta.id, ...who(actor), text: "started a round as the drawer" }).catch(() => {}); }
       else if (action === "pick") results.push({ op: "game", ...(await pickWord(meta, actor, (o as { word?: unknown }).word)) });
       else if (action === "guess") {
         await slowmode(meta, actor, "guess", roomSettings(meta).guessSlowSec[actor.kind]);
-        results.push({ op: "game", ...(await checkGuess(meta, actor, String((o as { word?: unknown }).word ?? ""), false)) });
+        const gw = String((o as { word?: unknown }).word ?? "");
+        const gr = await checkGuess(meta, actor, gw, false);
+        results.push({ op: "game", ...gr });
+        audit({ type: "guess", room: meta.id, ...who(actor), text: `guessed "${gw.slice(0, 40)}": ${(gr as { correct?: boolean }).correct ? "correct" : (gr as { close?: boolean }).close ? "close" : "wrong"}` }).catch(() => {});
       }
       else if (action === "skip") results.push({ op: "game", ...(await skipRound(meta, actor)) });
       else results.push({ op: "game", ...(await gameView(meta, actor)) });
     }
   }
 
-  // any successful write counts as presence
+  // any successful write counts as presence, and as "active" in the member list
   store.presencePut(meta.id, { name: actor.name, kind: actor.kind, t: Date.now() }).catch(() => {});
+  markActive(meta.id, actor.name);
   if (!seq) seq = (await store.range(meta.id, Number.MAX_SAFE_INTEGER - 1, 1)).head;
   return { ok: true, seq, changed, results };
 }

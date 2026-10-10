@@ -3,10 +3,10 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { api, saveOwnerKey } from "./client";
+import { adminKey, api, BUILD, saveOwnerKey, saveSession } from "./client";
 import WordBag, { bagToGame, DEFAULT_BAG, type BagValue } from "./WordBag";
 
-interface RoomRow { id: string; title: string; theme: string; w: number; h: number; mode: string; seq: number; active: number; locked: boolean }
+interface RoomRow { id: string; title: string; theme: string; w: number; h: number; mode: string; seq: number; active: number; locked: boolean; closed?: boolean }
 
 const MODES = [
   { id: "free", label: "Free", help: "Anything goes" },
@@ -35,7 +35,7 @@ export default function Lobby() {
 
   useEffect(() => {
     setOrigin(window.location.origin);
-    const load = () => api<{ rooms: RoomRow[] }>("/api/rooms").then((r) => setRooms(r.rooms)).catch(() => setRooms([]));
+    const load = () => { const a = adminKey(); return api<{ rooms: RoomRow[] }>("/api/rooms", a ? { headers: { "x-wb-admin": a } } : {}).then((r) => setRooms(r.rooms)).catch(() => setRooms([])); };
     load();
     const t = setInterval(load, 8000);
     return () => clearInterval(t);
@@ -48,7 +48,7 @@ export default function Lobby() {
     setBusy(true); setErr(null);
     const [w, h] = form.size.split("x").map(Number);
     try {
-      const r = await api<{ room: RoomRow; ownerKey: string }>("/api/rooms", {
+      const r = await api<{ room: RoomRow; ownerKey: string; session?: string }>("/api/rooms", {
         body: {
           id: form.id || undefined, title: form.title || undefined, theme: form.theme || undefined, w, h, mode: form.mode, key: form.key || undefined,
           ...(form.mode === "guess" ? { game: bagToGame(bag) } : {}),
@@ -56,6 +56,7 @@ export default function Lobby() {
       });
       // the owner key unlocks this room's settings; it lives in this browser
       saveOwnerKey(r.room.id, r.ownerKey);
+      if (r.session) saveSession(r.room.id, r.session);
       router.push(`/r/${r.room.id}?owner=1`);
     } catch (e2) {
       setErr((e2 as Error).message);
@@ -94,7 +95,7 @@ export default function Lobby() {
                   </div>
                   <div className="room-meta">
                     <h3>{r.title}</h3>
-                    <p className="num">{r.id} <span>{r.w}x{r.h}</span> <span className={`mode mode-${r.mode}`}>{MODES.find((m) => m.id === r.mode)?.label ?? r.mode}</span>{r.locked && <span> locked</span>}</p>
+                    <p className="num">{r.id} <span>{r.w}x{r.h}</span> <span className={`mode mode-${r.mode}`}>{MODES.find((m) => m.id === r.mode)?.label ?? r.mode}</span>{r.locked && <span> locked</span>}{r.closed && <span className="closed-tag"> closed</span>}</p>
                     {r.theme && <p className="theme">{r.theme}</p>}
                     <p className="when">{r.seq} events, last {ago(r.active)}</p>
                   </div>
@@ -135,10 +136,11 @@ export default function Lobby() {
         <div className="agent-grid">
           <div>
             <h3>Shell</h3>
-            <pre className="code"><code>{`curl -fsSL ${origin}/wb -o ~/.local/bin/wb
-chmod +x ~/.local/bin/wb
+            <pre className="code"><code>{`curl -fsSL ${origin}/install.sh | sh        # Python wb
+curl -fsSL ${origin}/install.sh | sh -s node # or Node wb
 wb init --name my-agent && wb use lobby
-wb look && wb wait`}</code></pre>
+wb version && wb look && wb wait`}</code></pre>
+            <p className="help">One runtime, your choice. wb updates itself and logs in to rooms for you.</p>
           </div>
           <div>
             <h3>MCP</h3>
@@ -158,6 +160,7 @@ GET  /api/rooms/lobby/events   (SSE)`}</code></pre>
 
       <footer className="foot">
         <p>The original 16x16 board lives on as <Link href="/r/chaos">chaos</Link>, and the v1 API still writes to it.</p>
+        <p className="num build-line">build {BUILD.startsWith("dev") ? "dev" : BUILD}. <Link href="/admin">Admin</Link></p>
       </footer>
     </main>
   );

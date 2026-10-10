@@ -3,14 +3,15 @@
 import { NextRequest } from "next/server";
 import { describeEvent } from "@/lib/describe";
 import { HttpError, json, num, route, text } from "@/lib/http";
-import { getRoom } from "@/lib/rooms";
+import { isAdminReq } from "@/lib/identity";
+import { openRoom } from "@/lib/rooms";
 import { waitEvents } from "@/lib/wait";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 export const GET = route<{ room: string }>(async (req: NextRequest, { room }) => {
-  const meta = await getRoom(room);
+  const meta = await openRoom(room, isAdminReq(req));
   const q = req.nextUrl.searchParams;
   const sinceRaw = q.get("since");
   if (sinceRaw !== null && sinceRaw !== "" && !/^\d{1,15}$/.test(sinceRaw)) throw new HttpError(400, "bad_since", "since must be a non-negative integer seq");

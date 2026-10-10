@@ -15,7 +15,7 @@ export const POST = route(async (req: NextRequest) => {
     const r = await callIdentityTool(body.name, args, readIdentity(req, { kind: "agent", ...body }));
     return json(r, r.isError ? 400 : 200);
   }
-  const actor = await resolveActor(req, { kind: "agent", ...body });
+  const actor = await resolveActor(req, { kind: "agent", ...body }, "tools");
   const r = await callTool(body.name, args, actor, req.signal);
   return json(r, r.isError ? 400 : 200);
 });

@@ -11,6 +11,7 @@
 //   of the fun. Every takeover is written to an audit log the admin can read.
 import { createHash } from "node:crypto";
 import type { NextRequest } from "next/server";
+import { parseClient } from "./clientInfo";
 import { HttpError } from "./http";
 import { getStore } from "./store";
 import type { Actor } from "./types";
@@ -34,7 +35,7 @@ export function clientIp(req: NextRequest): string {
   return (req.headers.get("x-forwarded-for") ?? "").split(",")[0].trim() || req.headers.get("x-real-ip") || "local";
 }
 
-export interface IdentityInput { name?: unknown; token?: unknown; kind?: unknown }
+export interface IdentityInput { name?: unknown; token?: unknown; kind?: unknown; session?: unknown }
 
 export interface RawIdentity { name: string; token: string; kind: Actor["kind"]; ip: string }
 
@@ -65,7 +66,25 @@ function takenError(name: string, hasToken: boolean) {
     { name, blindfold: BLINDFOLD });
 }
 
-export async function resolveActor(req: NextRequest, body: IdentityInput = {}): Promise<Actor> {
+export function isAdminReq(req: NextRequest) {
+  const admin = process.env.WB_ADMIN_KEY;
+  return !!admin && req.headers.get("x-wb-admin") === admin;
+}
+
+// Request context that rides along with the actor: client, transport, room session, admin flag.
+function context(req: NextRequest, body: IdentityInput, via: Actor["via"]) {
+  const q = req.nextUrl.searchParams;
+  const session = String(req.headers.get("x-wb-session") ?? body.session ?? q.get("session") ?? "").trim() || null;
+  return { client: parseClient(req.headers.get("user-agent"), via), via, session, admin: isAdminReq(req) };
+}
+
+export async function resolveActor(req: NextRequest, body: IdentityInput = {}, via: Actor["via"] = "http"): Promise<Actor> {
+  const ctx = context(req, body, via);
+  const a = await resolveName(req, body);
+  return { ...a, ...ctx };
+}
+
+async function resolveName(req: NextRequest, body: IdentityInput): Promise<Actor> {
   const { name, token, kind, ip } = readIdentity(req, body);
   const store = getStore();
   const key = claimKey(name);

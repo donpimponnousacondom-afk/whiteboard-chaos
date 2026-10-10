@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ALPHABET, EMPTY, hexToRgb, normHex } from "@/lib/palette";
 import { applyOps, decodeDelta, READ_OPS, type Op } from "@/lib/raster";
-import { api, ApiError, getIdentity, nonce, pref, setName as saveName, setPref } from "./client";
+import { adminKey, api, ApiError, BUILD, dropSession, ensureSession, getIdentity, nonce, OUTDATED_EVENT, ownerKeyFor, pref, roomSession, setName as saveName, setPref } from "./client";
 import GamePanel, { type GameState } from "./GamePanel";
 import InviteAgent from "./InviteAgent";
 import SettingsModal from "./SettingsModal";
@@ -13,12 +13,18 @@ import { ICON_FIT, ICON_MIRROR, ICON_UNDO, TOOLS, toolByKey, type Tool } from ".
 
 interface Meta {
   id: string; title: string; theme: string; w: number; h: number; mode: "free" | "place" | "guess" | "life";
-  bg: string; cooldownMs: number; burst: number; refillPerSec: number; locked: boolean;
+  bg: string; cooldownMs: number; burst: number; refillPerSec: number; locked: boolean; closed?: boolean;
 }
-interface LogEntry { key: string; seq?: number; kind: string; actor?: string; actorKind?: string; text: string; t: number }
+interface LogEntry { key: string; seq?: number; kind: string; actor?: string; actorKind?: string; text: string; t: number; client?: string; ip?: string; type?: string }
 interface Presence { name: string; kind: "human" | "agent"; t: number; status?: string; x?: number; y?: number; color?: string }
 interface Cursor { x: number; y: number; color?: string; kind?: string; t: number }
 interface WbEv { seq?: number; kind: string; actor?: string; actorKind?: string; [k: string]: unknown }
+interface Member { name: string; kind: "human" | "agent"; status: "active" | "online" | "idle" | "offline"; client: string; raw?: boolean; joinedAt: number; lastSeen: number; activity?: string; ip?: string }
+interface AuditLine { t: number; type: string; room?: string; name?: string; kind?: string; client?: string; raw?: boolean; ip?: string; text: string; code?: string }
+
+const AUDIT_GLYPH: Record<string, string> = { join: "***", leave: "***", kick: "***", unban: "***", room: "***", connect: "-->", disconnect: "<--", error: "!!!" };
+const hhmmss = (t: number) => new Date(t).toTimeString().slice(0, 8);
+const ago = (t: number) => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 90 ? `${s} s` : s < 5400 ? `${Math.round(s / 60)} min` : s < 172800 ? `${Math.round(s / 3600)} h` : `${Math.round(s / 86400)} d`; };
 
 const MODE_TEXT: Record<Meta["mode"], string> = {
   free: "free for all",
@@ -61,6 +67,12 @@ export default function Room({ roomId }: { roomId: string }) {
   const [narrow, setNarrow] = useState(false);
   const [feedback, setFeedback] = useState<{ text: string; tone: "good" | "close" | "bad" } | null>(null);
   const [wheel, setWheel] = useState<{ x: number; y: number } | null>(null);
+  const [outdated, setOutdated] = useState(false);
+  const [kicked, setKicked] = useState<string | null>(null);
+  const [members, setMembers] = useState<Member[]>([]);
+  const [debug, setDebug] = useState(false);
+  const [auditLog, setAuditLog] = useState<AuditLine[]>([]);
+  const [powers, setPowers] = useState<{ admin: boolean; owner: boolean }>({ admin: false, owner: false });
   const [help, setHelp] = useState(false);
   const [undoCount, setUndoCount] = useState(0);
 
@@ -270,6 +282,14 @@ export default function Room({ roomId }: { roomId: string }) {
     try { const r = await api<{ presence: Presence[] }>(`/api/rooms/${roomId}/presence`); setPresence(r.presence); } catch { /* ignore */ }
   }, [roomId]);
 
+  const refreshMembers = useCallback(async () => {
+    try {
+      const a = adminKey();
+      const r = await api<{ members: Member[] }>(`/api/rooms/${roomId}/members`, a ? { headers: { "x-wb-admin": a } } : {});
+      setMembers(r.members);
+    } catch { /* ignore */ }
+  }, [roomId]);
+
   const resync = useCallback(async () => {
     try {
       for (let i = 0; i < 4; i++) {
@@ -300,13 +320,31 @@ export default function Room({ roomId }: { roomId: string }) {
       return;
     }
     if (ev.kind === "presence") { refreshPresence(); return; }
-    if (ev.kind === "hello" || ev.kind === "reconnect") return;
+    if (ev.kind === "hello") {
+      if (typeof ev.build === "string" && ev.build !== BUILD && !BUILD.startsWith("dev") && !ev.build.startsWith("dev")) setOutdated(true);
+      return;
+    }
+    if (ev.kind === "reconnect") return;
+    if (ev.kind === "member") { refreshMembers(); return; }
+    if (ev.kind === "kick") {
+      const target = String(ev.target ?? "");
+      const why = ev.reason ? `: ${ev.reason}` : "";
+      addLog([{ key: `k${Date.now()}${target}`, kind: "system", t: Date.now(), text: `the admin removed ${target} from the room${ev.minutes ? ` for ${ev.minutes} min` : ""}${why}` }]);
+      if (target.toLowerCase() === getIdentity().name.toLowerCase()) { dropSession(roomId); setKicked(`The admin removed you from this room${ev.minutes ? ` for ${ev.minutes} min` : ""}${why}.`); }
+      refreshMembers();
+      return;
+    }
     if (ev.seq !== undefined) {
       if (ev.seq <= seqRef.current) return;
       seqRef.current = ev.seq;
       setSeqView(ev.seq);
     }
     const base = { key: `${ev.seq ?? Math.random()}`, seq: ev.seq, kind: ev.kind, actor: ev.actor, actorKind: ev.actorKind, t: Date.now() };
+    // a write marks its author "active" right away; the member poll clears it later
+    if (ev.actor && (ev.kind === "draw" || ev.kind === "chat")) {
+      const who = ev.actor;
+      setMembers((ms) => ms.some((x) => x.name === who && x.status !== "active") ? ms.map((x) => (x.name === who ? { ...x, status: "active", lastSeen: Date.now() } : x)) : ms);
+    }
     switch (ev.kind) {
       case "draw": {
         if (ev.palette) setPal(ev.palette as string[]);
@@ -335,7 +373,7 @@ export default function Room({ roomId }: { roomId: string }) {
         refreshGame();
         break;
     }
-  }, [addLog, loadBoard, refreshGame, refreshPresence, resync, setPal]);
+  }, [addLog, loadBoard, refreshGame, refreshMembers, refreshPresence, resync, roomId, setPal]);
 
   // initial load + SSE
   useEffect(() => {
@@ -357,7 +395,7 @@ export default function Room({ roomId }: { roomId: string }) {
     const startSse = () => {
       if (cancelled) return;
       setTransport("sse");
-      const src = new EventSource(`/api/rooms/${roomId}/events?since=${seqRef.current}`);
+      const src = new EventSource(`/api/rooms/${roomId}/events?${new URLSearchParams({ since: String(seqRef.current), name: getIdentity().name, kind: "human" })}`);
       es = src;
       src.onopen = () => setConn("live");
       src.onerror = () => {
@@ -372,7 +410,7 @@ export default function Room({ roomId }: { roomId: string }) {
       if (cancelled) return;
       const id = getIdentity();
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      const qs = new URLSearchParams({ name: id.name, token: id.token, kind: "human", since: String(seqRef.current) });
+      const qs = new URLSearchParams({ name: id.name, token: id.token, kind: "human", since: String(seqRef.current), session: roomSession(roomId) ?? "", build: BUILD });
       let opened = false;
       let ws: WebSocket;
       try { ws = new WebSocket(`${proto}://${location.host}/api/rooms/${roomId}/ws?${qs}`); } catch { startSse(); return; }
@@ -419,13 +457,47 @@ export default function Room({ roomId }: { roomId: string }) {
             text: e.kind === "draw" ? `${e.ops} (${e.n} px)` : String(e.text ?? e.phase ?? ""),
           })));
         } catch { /* ignore */ }
+        // log in to the room first: the WebSocket carries the session
+        try { await ensureSession(roomId); } catch (e) { if (e instanceof ApiError && e.code === "banned") setKicked(e.message); }
+        refreshMembers();
         if (pref === "sse") startSse(); else startWs(0);
       } catch (e) {
-        setError(e instanceof ApiError && e.status === 404 ? `Room "${roomId}" does not exist yet.` : `Could not load the room: ${(e as Error).message}`);
+        setError(e instanceof ApiError && e.status === 404 ? `Room "${roomId}" does not exist yet.` : e instanceof ApiError && e.code === "room_closed" ? e.message : `Could not load the room: ${(e as Error).message}`);
       }
     })();
     return () => { cancelled = true; es?.close(); if (wsTimer) clearTimeout(wsTimer); const w = wsRef.current; wsRef.current = null; w?.close(); pendingWs?.close(); };
-  }, [roomId, addLog, fit, handleEvent, loadBoard, setPal]);
+  }, [roomId, addLog, fit, handleEvent, loadBoard, setPal, refreshMembers]);
+
+  // who may see the debug feed; stale page; members poll
+  useEffect(() => { setPowers({ admin: !!adminKey(), owner: !!ownerKeyFor(roomId) }); }, [roomId, settingsOpen]);
+  useEffect(() => {
+    const on = () => setOutdated(true);
+    window.addEventListener(OUTDATED_EVENT, on);
+    return () => window.removeEventListener(OUTDATED_EVENT, on);
+  }, []);
+  useEffect(() => { const t = setInterval(refreshMembers, 10000); return () => clearInterval(t); }, [refreshMembers]);
+
+  // debug feed: the room's audit log (admin: with IPs; owner: without), polled while on
+  useEffect(() => {
+    if (!debug) return;
+    let since = 0;
+    let stop = false;
+    const pull = async () => {
+      const h: Record<string, string> = {};
+      const a = adminKey(); if (a) h["x-wb-admin"] = a;
+      const o = ownerKeyFor(roomId); if (o) h["x-wb-owner"] = o;
+      try {
+        const r = await api<{ entries: AuditLine[] }>(`/api/admin/audit?room=${roomId}&limit=200&since=${since}`, { headers: h });
+        if (stop || !r.entries.length) return;
+        since = Math.max(since, ...r.entries.map((e) => e.t));
+        setAuditLog((l) => [...l, ...r.entries.reverse()].slice(-300));
+      } catch (e) { if (e instanceof ApiError && e.status === 401) { setDebug(false); flash("The debug feed needs the admin key or this room's owner key (Settings).", "bad"); } }
+    };
+    setAuditLog([]);
+    pull();
+    const t = setInterval(pull, 2000);
+    return () => { stop = true; clearInterval(t); };
+  }, [debug, roomId, flash]);
 
   // heartbeat + presence poll + clock
   useEffect(() => {
@@ -855,7 +927,12 @@ export default function Room({ roomId }: { roomId: string }) {
   };
 
   const myName = name;
-  const visibleLog = useMemo(() => log.filter((l) => showDraws || l.kind !== "draw"), [log, showDraws]);
+  const visibleLog = useMemo(() => {
+    const base = log.filter((l) => showDraws || l.kind !== "draw");
+    if (!debug) return base;
+    const aud: LogEntry[] = auditLog.map((a, i) => ({ key: `a${a.t}-${i}`, kind: `audit audit-${a.type}${a.raw ? " raw" : ""}`, actor: a.name, actorKind: a.kind, t: a.t, text: a.text, client: a.client, ip: a.ip, type: a.type } as LogEntry));
+    return [...base, ...aud].sort((x, y) => x.t - y.t);
+  }, [log, showDraws, debug, auditLog]);
   // Chat scroll: follow new messages only while the reader is at the bottom.
   // Scroll the log box itself (never scrollIntoView, which also moves the page),
   // and key on the last message, not the count (the log is capped at 400).
@@ -883,7 +960,7 @@ export default function Room({ roomId }: { roomId: string }) {
     else setUnread((n) => n + 1);
   }, [lastKey, toBottom]);
   // jump to the newest message when the chat tab opens or the filter changes
-  useLayoutEffect(() => { toBottom(); }, [railTab, showDraws, toBottom]);
+  useLayoutEffect(() => { toBottom(); }, [railTab, showDraws, debug, toBottom]);
 
   if (error) {
     return (
@@ -896,8 +973,23 @@ export default function Room({ roomId }: { roomId: string }) {
 
   const m = meta;
   const cooldownLeft = Math.max(0, cooldownUntil - now);
-  const humans = presence.filter((p) => p.kind === "human").length;
-  const agents = presence.length - humans;
+  const here = members.filter((x) => x.status === "active" || x.status === "online");
+  const humans = here.filter((p) => p.kind === "human").length;
+  const agents = here.length - humans;
+  const kick = async (name: string) => {
+    const mins = window.prompt(`Kick ${name} from this room for how many minutes? (0 = until you unban)`, "30");
+    if (mins === null) return;
+    const reason = window.prompt("Reason (shown to everyone, optional):", "") ?? "";
+    try {
+      await api(`/api/admin/rooms/${roomId}`, { body: { action: "kick", name, minutes: Number(mins) || 0, reason }, headers: { "x-wb-admin": adminKey() } });
+      flash(`${name} was removed.`);
+      refreshMembers();
+    } catch (e) { flash((e as Error).message, "bad"); }
+  };
+  const leaveRoom = async () => {
+    if (!window.confirm("Log out of this room? You join again the next time you draw or chat here.")) return;
+    try { await api(`/api/rooms/${roomId}/leave`, { body: {} }); dropSession(roomId); flash("You left the room."); refreshMembers(); } catch (e) { flash((e as Error).message, "bad"); }
+  };
   const roundLeft = game?.status === "active" && game.endsAt ? Math.max(0, Math.ceil((game.endsAt - now) / 1000)) : 0;
 
   const dockChat = (float: boolean) => { setChatFloat(float); setPref("chatFloat", float ? "1" : "0"); };
@@ -918,21 +1010,32 @@ export default function Room({ roomId }: { roomId: string }) {
     <>
           <div className="tabs" role="tablist">
         <button role="tab" aria-selected={railTab === "chat"} onClick={() => setRailTab("chat")}>Chat</button>
-        <button role="tab" aria-selected={railTab === "people"} onClick={() => setRailTab("people")}>Here now <span className="num">{presence.length}</span></button>
+        <button role="tab" aria-selected={railTab === "people"} onClick={() => setRailTab("people")}>People <span className="num">{here.length}</span></button>
         {railTab === "chat" && (
-          <label className="toggle"><input type="checkbox" checked={showDraws} onChange={(e) => setShowDraws(e.target.checked)} /> strokes</label>
+          <span className="toggles">
+            <label className="toggle"><input type="checkbox" checked={showDraws} onChange={(e) => setShowDraws(e.target.checked)} /> strokes</label>
+            {(powers.admin || powers.owner) && (
+              <label className="toggle debug" title={powers.admin ? "Who connects, with what client and version, from which IP; draws, guesses and refused requests" : "Who connects, with what client; draws, guesses and refused requests (IPs need the admin key)"}>
+                <input type="checkbox" checked={debug} onChange={(e) => setDebug(e.target.checked)} /> debug
+              </label>
+            )}
+          </span>
         )}
         {!chatFloat && !narrow && <button className="float-btn" onClick={() => dockChat(true)} title="Float the chat over the canvas">Float</button>}
       </div>
 
       {railTab === "people" ? (
-        <ul className="people">
-          {presence.length === 0 && <li className="empty">Nobody else yet. Invite an agent to get things moving.</li>}
-          {presence.map((p) => (
-            <li key={p.name} className={p.kind}>
+        <ul className="people roster">
+          {members.length === 0 && <li className="empty">Nobody is logged in yet. Invite an agent to get things moving.</li>}
+          {members.map((p) => (
+            <li key={p.name} className={`${p.kind} st-${p.status}`}>
+              <span className="dot" aria-hidden />
               <span className="who">{p.name}{p.name === myName ? " (you)" : ""}</span>
-              <span className="kind">{p.kind === "agent" ? "agent" : "human"}</span>
-              {p.status && <span className="status">{p.status}</span>}
+              <span className="state">{p.status === "active" ? "drawing now" : p.status === "online" ? "here" : p.status === "idle" ? `idle ${ago(p.lastSeen)}` : `away ${ago(p.lastSeen)}`}</span>
+              <span className={`client${p.raw ? " raw" : ""}`} title={p.raw ? "Not an official client: raw HTTP calls" : "Client and version"}>{p.client}{p.raw ? " (raw http)" : ""}{p.ip ? `  ${p.ip}` : ""}</span>
+              {p.activity && <span className="status">{p.activity}</span>}
+              {powers.admin && p.name !== myName && <button className="linkish danger kick" onClick={() => kick(p.name)}>Kick</button>}
+              {p.name === myName && <button className="linkish kick" onClick={leaveRoom}>Leave</button>}
             </li>
           ))}
         </ul>
@@ -940,7 +1043,16 @@ export default function Room({ roomId }: { roomId: string }) {
         <div className="log-wrap">
         <div className="log" aria-live="polite" ref={logBox} onScroll={onLogScroll}>
           {visibleLog.length === 0 && <p className="empty">No messages yet. Say hi, or press Enter to start typing.</p>}
-          {visibleLog.map((l) => (
+          {visibleLog.map((l) => l.type ? (
+            <div key={l.key} className={`entry ${l.kind}`}>
+              <span className="ts num">{hhmmss(l.t)}</span>
+              <span className="glyph num">{AUDIT_GLYPH[l.type] ?? "-!-"}</span>
+              {l.actor && <span className={`who ${l.actorKind ?? ""}`}>{l.actor}</span>}
+              {l.client && <span className="cl">[{l.client}]</span>}
+              {l.ip && <span className="ip num">{l.ip}</span>}
+              <span className="text">{l.text}</span>
+            </div>
+          ) : (
             <div key={l.key} className={`entry ${l.kind}`}>
               {l.actor && (l.kind === "chat" || l.kind === "draw") && <span className={`who ${l.actorKind}`}>{l.actor}</span>}
               <span className="text">{l.text}</span>
@@ -964,6 +1076,18 @@ export default function Room({ roomId }: { roomId: string }) {
 
   return (
     <div className="room">
+      {outdated && (
+        <div className="banner warn" role="alert">
+          <span>A new version of the whiteboard is live. This page is out of date, so your drawing may not be saved.</span>
+          <button className="btn hot small" onClick={() => location.reload()}>Reload now</button>
+        </div>
+      )}
+      {kicked && (
+        <div className="banner bad" role="alert">
+          <span>{kicked}</span>
+          <Link href="/" className="btn small">Back to the lobby</Link>
+        </div>
+      )}
       <header className="room-bar">
         <Link href="/" className="wordmark small" aria-label="Chaos Whiteboard lobby"><span>CHAOS</span> <b>WHITEBOARD</b></Link>
         <div className="room-title">
@@ -976,6 +1100,7 @@ export default function Room({ roomId }: { roomId: string }) {
           {latency !== null && <span className="num" title="Round trip of your last write">{latency} ms</span>}
           <span className="num" title="Events in this room">seq {seqView}</span>
           <span title="People here"><i className="h">{humans}</i> humans, <i className="a">{agents}</i> agents</span>
+          <span className="build num" title="The version of the whiteboard this page runs. When the server moves on, a banner asks you to reload.">build {BUILD.startsWith("dev") ? "dev" : BUILD}</span>
         </div>
         <div className="room-actions">
           <label className="name-field" title="Your name. Saved in this browser.">
@@ -1118,7 +1243,7 @@ export default function Room({ roomId }: { roomId: string }) {
 
       {wheel && <ToolWheel at={wheel} tool={tool} color={tool === "eraser" ? "transparent" : color} colors={palette} onHover={(p) => { wheelPick.current = p; }} onPick={(p) => { wheelPick.current = p; closeWheel(true); }} />}
       {help && <KeysHelp onClose={() => setHelp(false)} guessRoom={m?.mode === "guess"} />}
-      {settingsOpen && m && <SettingsModal roomId={m.id} mode={m.mode} title={m.title} theme={m.theme} onClose={() => setSettingsOpen(false)} flash={flash} />}
+      {settingsOpen && m && <SettingsModal roomId={m.id} mode={m.mode} title={m.title} theme={m.theme} locked={m.locked} closed={!!m.closed} onClose={() => setSettingsOpen(false)} flash={flash} />}
       {invite && m && <InviteAgent room={m.id} title={m.title} onClose={() => setInvite(false)} />}
     </div>
   );

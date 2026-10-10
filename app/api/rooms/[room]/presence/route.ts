@@ -1,22 +1,24 @@
 import { NextRequest } from "next/server";
 import { json, readJson, route } from "@/lib/http";
-import { resolveActor } from "@/lib/identity";
-import { getRoom } from "@/lib/rooms";
+import { isAdminReq, resolveActor } from "@/lib/identity";
+import { requireMember } from "@/lib/members";
+import { openRoom } from "@/lib/rooms";
 import { getStore } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 type P = { room: string };
 
-export const GET = route<P>(async (_req: NextRequest, { room }) => {
-  const meta = await getRoom(room);
+export const GET = route<P>(async (req: NextRequest, { room }) => {
+  const meta = await openRoom(room, isAdminReq(req));
   return json({ presence: await getStore().presenceList(meta.id, 30000) });
 });
 
 // Heartbeat + cursor. Ephemeral: published live, never stored in history.
 export const POST = route<P>(async (req: NextRequest, { room }) => {
-  const meta = await getRoom(room);
+  const meta = await openRoom(room, isAdminReq(req));
   const body = await readJson(req);
   const actor = await resolveActor(req, body);
+  await requireMember(meta, actor);
   const store = getStore();
   const x = body.x === undefined || body.x === null ? undefined : Math.round(Number(body.x));
   const y = body.y === undefined || body.y === null ? undefined : Math.round(Number(body.y));

@@ -57,6 +57,10 @@ export interface Store {
   kvIncr(key: string, ttlMs: number): Promise<number>;
   // capped audit lists (newest first)
   logPush(key: string, val: string, max: number): Promise<void>;
+  hashSet(key: string, field: string, val: string): Promise<void>;
+  hashGet(key: string, field: string): Promise<string | null>;
+  hashAll(key: string): Promise<Record<string, string>>;
+  hashDel(key: string, field: string): Promise<void>;
   logRange(key: string, n: number): Promise<string[]>;
   scoreAdd(room: string, name: string, pts: number): Promise<void>;
   scoreTop(room: string, n: number): Promise<{ name: string; score: number }[]>;
@@ -112,9 +116,9 @@ if cost > 0 then
   local mult = tonumber(ARGV[14])
   local w1, w2
   t1, w1 = check(KEYS[5], burst, rate)
-  if not t1 then return {2, w1} end
+  if not t1 then return {2, w1, 1} end
   t2, w2 = check(KEYS[6], burst * mult, rate * mult)
-  if not t2 then return {2, w2} end
+  if not t2 then return {2, w2, 2} end
 end
 local cur = tonumber(redis.call('GET', KEYS[2]) or '0')
 if ARGV[13] ~= '' and tonumber(ARGV[13]) ~= cur then return {3, cur} end
@@ -181,7 +185,7 @@ export function encodeChanges(changes: Map<number, string>): string {
 // ---------------------------------------------------------------------------
 
 type RedisWithCmds = Redis & {
-  wbCommit(...args: (string | number)[]): Promise<[number, number]>;
+  wbCommit(...args: (string | number)[]): Promise<[number, number, number?]>;
   wbPalette(...args: (string | number)[]): Promise<string[]>;
 };
 
@@ -284,7 +288,7 @@ class RedisStore implements Store {
     let data = "";
     if (q.full !== undefined) { mode = "f"; data = q.full; }
     else if (q.changes && q.changes.size) { mode = "d"; data = encodeChanges(q.changes); }
-    const [code, val] = await this.r.wbCommit(
+    const [code, val, which] = await this.r.wbCommit(
       K.board(room), K.seq(room), K.ev(room),
       K.nonce(room, q.nonce || "-"), K.bucket(room, q.bucket), K.bucket(room, "ip:" + (q.ipBucket || "-")),
       q.n, mode, data, JSON.stringify(q.event), streamMaxlen(q.n), NONCE_TTL_S,
@@ -292,7 +296,7 @@ class RedisStore implements Store {
       q.expectSeq === undefined ? "" : String(q.expectSeq), IP_MULT,
     );
     if (code === 1) return { status: "dup", seq: Number(val) };
-    if (code === 2) return { status: "limited", retryMs: Number(val) };
+    if (code === 2) return { status: "limited", retryMs: Number(val), bucket: which === 2 ? "ip" : "name" };
     if (code === 3) return { status: "conflict", seq: Number(val) };
     return { status: "ok", seq: Number(val) };
   }
@@ -374,6 +378,11 @@ class RedisStore implements Store {
   async logPush(key: string, val: string, max: number) { await this.r.multi().lpush(key, val).ltrim(key, 0, max - 1).exec(); }
 
   async logRange(key: string, n: number) { return this.r.lrange(key, 0, n - 1); }
+
+  async hashSet(key: string, field: string, val: string) { await this.r.hset(key, field, val); }
+  async hashGet(key: string, field: string) { return this.r.hget(key, field); }
+  async hashAll(key: string) { return this.r.hgetall(key); }
+  async hashDel(key: string, field: string) { await this.r.hdel(key, field); }
 
   async scoreAdd(room: string, name: string, pts: number) { await this.r.zincrby(K.scores(room), pts, name); }
 
@@ -477,9 +486,9 @@ class MemoryStore implements Store {
       const rate = q.refillPerSec / 1000;
       const k1 = `${room}:${q.bucket}`, k2 = `${room}:ip:${q.ipBucket || "-"}`;
       const a = check(k1, q.burst, rate);
-      if (!a.ok) return { status: "limited", retryMs: a.wait };
+      if (!a.ok) return { status: "limited", retryMs: a.wait, bucket: "name" };
       const b = check(k2, q.burst * IP_MULT, rate * IP_MULT);
-      if (!b.ok) return { status: "limited", retryMs: b.wait };
+      if (!b.ok) return { status: "limited", retryMs: b.wait, bucket: "ip" };
       this.buckets.set(k1, { t: a.tokens - q.cost, ts: now });
       this.buckets.set(k2, { t: b.tokens - q.cost, ts: now });
     }
@@ -546,6 +555,12 @@ class MemoryStore implements Store {
   }
 
   async logRange(key: string, n: number) { return (this.lists.get(key) ?? []).slice(0, n); }
+
+  private hashes = new Map<string, Map<string, string>>();
+  async hashSet(key: string, field: string, val: string) { const h = this.hashes.get(key) ?? new Map(); h.set(field, val); this.hashes.set(key, h); }
+  async hashGet(key: string, field: string) { return this.hashes.get(key)?.get(field) ?? null; }
+  async hashAll(key: string) { return Object.fromEntries(this.hashes.get(key) ?? []); }
+  async hashDel(key: string, field: string) { this.hashes.get(key)?.delete(field); }
 
   async scoreAdd(room: string, name: string, pts: number) {
     const r = this.rooms.get(room);

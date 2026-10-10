@@ -5,8 +5,13 @@
 //   - the stream closes itself before the platform limit; clients reconnect transparently
 import { NextRequest } from "next/server";
 import { openFeed } from "@/lib/feed";
+import { BUILD } from "@/lib/build";
+import { parseClient } from "@/lib/clientInfo";
 import { route } from "@/lib/http";
-import { getRoom, publicMeta } from "@/lib/rooms";
+import { isAdminReq, readIdentity } from "@/lib/identity";
+import { markConnected, markDisconnected } from "@/lib/members";
+import { openRoom, publicMeta } from "@/lib/rooms";
+import type { Actor } from "@/lib/types";
 import type { WbEvent } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -16,8 +21,16 @@ export const maxDuration = 300;
 const LIFETIME_MS = Number(process.env.WB_SSE_MAX_S ?? 270) * 1000;
 
 export const GET = route<{ room: string }>(async (req: NextRequest, { room }) => {
-  const meta = await getRoom(room);
+  const admin = isAdminReq(req);
+  const meta = await openRoom(room, admin);
   const q = req.nextUrl.searchParams;
+  // who is watching (for the admin feed only; reading needs no login)
+  let viewer: Actor | null = null;
+  try {
+    const id = readIdentity(req);
+    if (!id.name.startsWith("anon-")) viewer = { name: id.name, kind: id.kind, ip: id.ip, client: parseClient(req.headers.get("user-agent")) };
+  } catch { /* bad name: anonymous viewer */ }
+  const opened = Date.now();
   const lastId = req.headers.get("last-event-id") ?? q.get("since");
   const since = lastId !== null && /^\d{1,15}$/.test(lastId) ? Number(lastId) : null;
   const ephemeral = q.get("cursors") !== "0";
@@ -33,10 +46,14 @@ export const GET = route<{ room: string }>(async (req: NextRequest, { room }) =>
         write(`${id}data: ${JSON.stringify(ev)}\n\n`);
       };
       write(`retry: 1000\n: chaos-whiteboard ${meta.id}\n\n`);
-      write(`data: ${JSON.stringify({ kind: "hello", t: Date.now(), room: publicMeta(meta), since })}\n\n`);
+      write(`data: ${JSON.stringify({ kind: "hello", t: Date.now(), room: publicMeta(meta), since, build: BUILD })}\n\n`);
+      if (viewer) markConnected(meta, viewer, "sse").catch(() => {});
       let close = () => {};
       let aborted = false;
-      const onAbort = () => { aborted = true; cleanup(); };
+      const onAbort = () => {
+        aborted = true; cleanup();
+        if (viewer) markDisconnected(meta, viewer, "sse", Date.now() - opened).catch(() => {});
+      };
       cleanup = () => { open = false; close(); try { controller.close(); } catch { /* closed */ } };
       req.signal.addEventListener("abort", onAbort);
       try {

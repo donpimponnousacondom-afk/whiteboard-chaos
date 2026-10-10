@@ -5,8 +5,8 @@
 //     title, theme }
 import { NextRequest } from "next/server";
 import { json, readJson, route } from "@/lib/http";
-import { resolveActor } from "@/lib/identity";
-import { getRoom, isOwner, publicSettings, updateSettings } from "@/lib/rooms";
+import { isAdminReq, resolveActor } from "@/lib/identity";
+import { isOwner, openRoom, publicSettings, updateSettings } from "@/lib/rooms";
 import { roomSettings } from "@/lib/settings";
 import { CATEGORIES } from "@/lib/words";
 
@@ -14,7 +14,7 @@ export const dynamic = "force-dynamic";
 type P = { room: string };
 
 export const GET = route<P>(async (req: NextRequest, { room }) => {
-  const meta = await getRoom(room);
+  const meta = await openRoom(room, isAdminReq(req));
   const owner = isOwner(meta, req.headers.get("x-wb-owner"), req.headers.get("x-wb-admin"));
   return json({
     settings: owner ? roomSettings(meta) : publicSettings(meta),

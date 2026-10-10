@@ -41,7 +41,7 @@ async function handle(msg: Rpc, req: NextRequest) {
         catch (e) { return ok({ content: [{ type: "text", text: `identity error: ${(e as Error).message}` }], isError: true }); }
       }
       let actor;
-      try { actor = await resolveActor(req, { kind: "agent", ...(args.as ? { name: args.as } : {}) }); }
+      try { actor = await resolveActor(req, { kind: "agent", ...(args.as ? { name: args.as } : {}) }, "mcp"); }
       catch (e) { return ok({ content: [{ type: "text", text: `identity error: ${(e as Error).message}` }], isError: true }); }
       return ok(await callTool(name, args, actor, req.signal));
     }

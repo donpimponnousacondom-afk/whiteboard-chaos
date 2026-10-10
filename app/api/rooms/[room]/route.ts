@@ -1,15 +1,15 @@
 import { NextRequest } from "next/server";
 import { gameView } from "@/lib/game";
 import { HttpError, json, readJson, route } from "@/lib/http";
-import { resolveActor } from "@/lib/identity";
-import { getRoom, publicMeta, updateRoom } from "@/lib/rooms";
+import { isAdminReq, resolveActor } from "@/lib/identity";
+import { getRoom, openRoom, publicMeta, updateRoom } from "@/lib/rooms";
 import { getStore } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 type P = { room: string };
 
 export const GET = route<P>(async (req: NextRequest, { room }) => {
-  const meta = await getRoom(room);
+  const meta = await openRoom(room, isAdminReq(req));
   const store = getStore();
   const [snap, presence] = await Promise.all([store.snapshot(meta.id, meta.w * meta.h), store.presenceList(meta.id, 30000)]);
   const actor = req.headers.get("x-wb-name") ? await resolveActor(req).catch(() => null) : null;

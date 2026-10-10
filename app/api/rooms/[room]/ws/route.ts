@@ -4,8 +4,8 @@
 import { experimental_upgradeWebSocket } from "@vercel/functions";
 import { NextRequest } from "next/server";
 import { json, route } from "@/lib/http";
-import { resolveActor } from "@/lib/identity";
-import { getRoom } from "@/lib/rooms";
+import { isAdminReq, resolveActor } from "@/lib/identity";
+import { openRoom } from "@/lib/rooms";
 import { runWsSession } from "@/lib/wsSession";
 
 export const dynamic = "force-dynamic";
@@ -15,8 +15,8 @@ export const maxDuration = 300;
 const LIFETIME_MS = Number(process.env.WB_SSE_MAX_S ?? 270) * 1000;
 
 export const GET = route<{ room: string }>(async (req: NextRequest, { room }) => {
-  const meta = await getRoom(room);
-  const actor = await resolveActor(req);
+  const meta = await openRoom(room, isAdminReq(req));
+  const actor = await resolveActor(req, {}, "ws");
   if ((req.headers.get("upgrade") ?? "").toLowerCase() !== "websocket") {
     return json({ ok: false, error: "upgrade_required", message: "connect with a WebSocket client, or use /events (SSE) + POST /ops" }, 426);
   }

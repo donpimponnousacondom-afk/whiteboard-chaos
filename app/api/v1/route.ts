@@ -37,7 +37,7 @@ export const POST = route(async (req: NextRequest) => {
   if (typeof body.color !== "string" || !/^#[0-9a-fA-F]{6}$/.test(body.color)) return res(400, { ok: false, error: "bad_color" });
   if (typeof body.nonce !== "string" || !/^[A-Za-z0-9._-]{8,64}$/.test(body.nonce)) return res(400, { ok: false, error: "bad_nonce" });
   const color = body.color.toLowerCase();
-  const actor = await resolveActor(req, { ...body, name: body.name ?? req.headers.get("x-wb-name") ?? undefined });
+  const actor = await resolveActor(req, { ...body, name: body.name ?? req.headers.get("x-wb-name") ?? undefined }, "v1");
   try {
     const r = await act(ROOM, actor, { ops: [{ op: "px", x, y, c: color === "#000000" ? null : color }], nonce: body.nonce }, null);
     if (r.duplicate) return res(409, { ok: false, error: "nonce_replayed" });

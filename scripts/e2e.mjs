@@ -11,9 +11,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const hdr = (name) => ({ "content-type": "application/json", "x-wb-name": name, "x-wb-token": name + "-secret-token" });
 const fail = (m) => { console.error("FAIL:", m); process.exit(1); };
 
+// writers log in to the room once (POST /join) and send the session on every write
+const sessions = new Map();
+async function session(base, name) {
+  if (!sessions.has(name)) {
+    const r = await fetch(`${base}/api/rooms/${room}/join`, { method: "POST", headers: hdr(name), body: "{}" });
+    const j = await r.json();
+    if (!j.session) fail("join " + JSON.stringify(j));
+    sessions.set(name, j.session);
+  }
+  return sessions.get(name);
+}
 async function post(base, path, body, name = "e2e") {
+  const extra = path.startsWith(`/api/rooms/${room}/`) ? { "x-wb-session": await session(base, name) } : {};
   const t0 = performance.now();
-  const r = await fetch(base + path, { method: "POST", headers: hdr(name), body: JSON.stringify(body) });
+  const r = await fetch(base + path, { method: "POST", headers: { ...hdr(name), ...extra }, body: JSON.stringify(body) });
   const j = await r.json();
   return { status: r.status, j, ms: performance.now() - t0 };
 }

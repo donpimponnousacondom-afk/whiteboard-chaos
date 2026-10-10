@@ -12,8 +12,8 @@ interface Settings {
   game: { choices: 1 | 3 | 5; roundSec: number; categories: string[]; difficulty: BagValue["difficulty"]; custom: string[]; customOnly: boolean; customCount?: number };
 }
 
-export default function SettingsModal({ roomId, mode, title, theme, onClose, flash }: {
-  roomId: string; mode: string; title: string; theme: string; onClose: () => void; flash: (t: string, tone?: "info" | "bad") => void;
+export default function SettingsModal({ roomId, mode, title, theme, locked, closed, onClose, flash }: {
+  roomId: string; mode: string; title: string; theme: string; locked: boolean; closed: boolean; onClose: () => void; flash: (t: string, tone?: "info" | "bad") => void;
 }) {
   const [s, setS] = useState<Settings | null>(null);
   const [owner, setOwner] = useState(false);
@@ -23,6 +23,16 @@ export default function SettingsModal({ roomId, mode, title, theme, onClose, fla
   const [bag, setBag] = useState<BagValue>(DEFAULT_BAG);
   const [meta, setMeta] = useState({ title, theme });
   const [saving, setSaving] = useState(false);
+  const [pw, setPw] = useState("");
+  const [note, setNote] = useState("");
+  const [mod, setMod] = useState({ locked, closed });
+  const moderate = async (body: Record<string, unknown>, done: string) => {
+    try {
+      const r = await api<{ room: { locked: boolean; closed: boolean } }>(`/api/admin/rooms/${roomId}`, { body, headers: { "x-wb-admin": adminKey() } });
+      setMod({ locked: r.room.locked, closed: r.room.closed });
+      flash(done);
+    } catch (e) { flash((e as Error).message, "bad"); }
+  };
 
   const load = async () => {
     const r = await api<{ settings: Settings; youAreOwner: boolean; hasOwnerKey: boolean }>(`/api/rooms/${roomId}/settings`, { headers: ownerHeaders(roomId) });
@@ -123,6 +133,27 @@ export default function SettingsModal({ roomId, mode, title, theme, onClose, fla
             )}
             {owner && ok && <p className="note">Your owner key is saved in this browser. Keep a copy somewhere safe: <code>{ok}</code></p>}
             {owner && !ok && adminKey() && <p className="note">You are using the admin key.</p>}
+            {owner && adminKey() && (
+              <section className="moderation" aria-labelledby="mod-title">
+                <h3 id="mod-title">Moderation</h3>
+                <p className="note">Only you see this: it needs the admin key. Kick people from the People tab. The debug toggle in the chat shows who connects, with what, and every refused request.</p>
+                <div className="mod-row">
+                  <span>{mod.closed ? "The room is closed: only you can see it." : "The room is open."}</span>
+                  {mod.closed
+                    ? <button className="btn" onClick={() => moderate({ action: "open" }, "Room opened.")}>Open the room</button>
+                    : <>
+                        <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Reason, shown to visitors (optional)" maxLength={120} />
+                        <button className="btn danger" onClick={() => moderate({ action: "close", note }, "Room closed. Nobody but you can see it now.")}>Close the room</button>
+                      </>}
+                </div>
+                <div className="mod-row">
+                  <span>{mod.locked ? "Drawing needs a password." : "Anyone logged in can draw."}</span>
+                  <input type="text" value={pw} onChange={(e) => setPw(e.target.value)} placeholder={mod.locked ? "New password" : "Password for drawing"} maxLength={80} autoComplete="off" />
+                  <button className="btn" disabled={!pw.trim()} onClick={() => { moderate({ action: "key", key: pw.trim() }, "Password set. Share it with the players you want."); setPw(""); }}>{mod.locked ? "Change" : "Set password"}</button>
+                  {mod.locked && <button className="btn ghost" onClick={() => moderate({ action: "key", key: "" }, "Password removed.")}>Remove</button>}
+                </div>
+              </section>
+            )}
             {owner && (
               <div className="key-tools">
                 <button type="button" className="linkish" onClick={() => setKeyOpen((v) => !v)} aria-expanded={keyOpen}>{keyOpen ? "Hide key box" : adminKey() ? "Use another key" : "Use the admin key"}</button>

@@ -1,14 +1,14 @@
 import { NextRequest } from "next/server";
 import { gameView } from "@/lib/game";
 import { json, readJson, route } from "@/lib/http";
-import { resolveActor } from "@/lib/identity";
-import { act, getRoom } from "@/lib/rooms";
+import { isAdminReq, resolveActor } from "@/lib/identity";
+import { act, openRoom } from "@/lib/rooms";
 
 export const dynamic = "force-dynamic";
 type P = { room: string };
 
 export const GET = route<P>(async (req: NextRequest, { room }) => {
-  const meta = await getRoom(room);
+  const meta = await openRoom(room, isAdminReq(req));
   const actor = await resolveActor(req).catch(() => null);
   return json(await gameView(meta, actor));
 });

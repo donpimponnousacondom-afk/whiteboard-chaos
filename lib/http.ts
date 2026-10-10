@@ -1,4 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
+import { audit, fold } from "./audit";
+import { BUILD } from "./build";
+import { parseClient } from "./clientInfo";
 import { CLI_LATEST, cliMin, cliVersionOf, cmpVersion } from "./cliVersion";
 
 export class HttpError extends Error {
@@ -29,6 +32,7 @@ type Ctx<P> = { params: Promise<P> };
 
 // Refuse outdated wb CLIs with 426 and the exact update command.
 function cliGuard(req: NextRequest) {
+  if (req.nextUrl.pathname === "/api/version") return; // "wb version" must always answer
   const v = cliVersionOf(req.headers.get("user-agent"));
   const min = cliMin();
   if (!v || !min || cmpVersion(v, min) >= 0) return;
@@ -40,16 +44,27 @@ function cliGuard(req: NextRequest) {
     { yourVersion: v, minVersion: min, latestVersion: CLI_LATEST, update });
 }
 
+// A browser page from an older deploy may not write: it would speak an old
+// protocol. It gets 426 app_outdated and shows the "reload" banner.
+function buildGuard(req: NextRequest) {
+  if (req.method === "GET" || req.method === "HEAD") return;
+  const b = req.headers.get("x-wb-build");
+  if (!b || b === BUILD || BUILD.startsWith("dev")) return;
+  throw new HttpError(426, "app_outdated", `this page is from an older version of the whiteboard (${b}); the server runs ${BUILD}. Reload the page.`, { build: BUILD });
+}
+
 export function route<P = Record<string, string>>(fn: (req: NextRequest, params: P) => Promise<Response>) {
   return async (req: NextRequest, ctx: Ctx<P>) => {
     try {
       cliGuard(req);
+      buildGuard(req);
       const res = await fn(req, (await ctx?.params) ?? ({} as P));
       try { res.headers.set("x-wb-cli-latest", CLI_LATEST); } catch { /* immutable headers */ }
       return res;
     } catch (e) {
       const res = fail(e);
       res.headers.set("x-wb-cli-latest", CLI_LATEST);
+      auditError(req, e).catch(() => {});
       return res;
     }
   };
@@ -75,4 +90,24 @@ export function num(v: string | null | undefined, d?: number): number | undefine
   if (v === null || v === undefined || v === "") return d;
   const n = Number(v);
   return Number.isFinite(n) ? n : d;
+}
+
+// Every refused request lands in the admin feed: who, from where, with what
+// client, and why (rate limit bucket, slowmode, not joined, outdated CLI...).
+async function auditError(req: NextRequest, e: unknown) {
+  const status = e instanceof HttpError ? e.status : 500;
+  const code = e instanceof HttpError ? e.code : "internal";
+  if (status === 404 && code !== "room_not_found") return;
+  const url = req.nextUrl;
+  const room = /^\/api\/rooms\/([a-z0-9][a-z0-9-]{0,31})(?:\/|$)/.exec(url.pathname)?.[1];
+  const ip = (req.headers.get("x-forwarded-for") ?? "").split(",")[0].trim() || req.headers.get("x-real-ip") || "local";
+  const name = (req.headers.get("x-wb-name") ?? url.searchParams.get("name") ?? "").slice(0, 24) || undefined;
+  const client = parseClient(req.headers.get("user-agent"));
+  const f = fold(`err:${ip}:${name}:${code}:${url.pathname}`, 2000);
+  if (!f.emit) return;
+  const msg = e instanceof Error ? e.message : String(e);
+  await audit({
+    type: "error", room, name, client: client.label, raw: client.raw, ip, code,
+    text: `${req.method} ${url.pathname.replace(/^\/api/, "")} -> ${status} ${code}${f.n > 1 ? ` (x${f.n})` : ""}: ${msg.slice(0, 160)}`,
+  });
 }
