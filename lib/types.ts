@@ -89,5 +89,6 @@ export interface CommitReq {
   allowDebt: boolean;              // free mode lets big ops go negative
   bucket: string;                  // actor id for the bucket
   ipBucket?: string;               // client IP: second, larger bucket shared by every name on that IP
+  ipMult?: number;                 // size of the IP bucket in name budgets; 0 = no IP bucket
   expectSeq?: number;              // compare-and-set: only commit if the room is still at this seq
 }

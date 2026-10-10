@@ -12,6 +12,7 @@ import { ALPHABET, DEFAULT_PALETTE, EMPTY, MAX_COLORS, normHex } from "./palette
 import { applyOps, BULK_OPS, collectHexes, DRAW_OPS, Op, OpError } from "./raster";
 import { getStore, nonceKey, NONCE_TTL_MS } from "./store";
 import { randomBytes } from "node:crypto";
+import { ipMultFor } from "./serverConfig";
 import { DEFAULT_SETTINGS, mergeSettings, roomSettings } from "./settings";
 import type { Actor, Mode, RoomMeta, RoomSettings, WbEvent } from "./types";
 
@@ -144,7 +145,7 @@ export async function createRoom(input: CreateInput, actor: Actor): Promise<Room
   const id = String(input.id ?? "").toLowerCase().trim() || randomId();
   if (!ROOM_RE.test(id)) throw new HttpError(400, "bad_room", "room id must match [a-z0-9][a-z0-9-]{0,31}");
   if (PRESETS[id] || (await store.getMeta(id))) throw new HttpError(409, "room_exists", `room '${id}' already exists`);
-  const n = await store.kvIncr(`wb:rl:create:${actor.ip}`, 3600000);
+  const n = (await ipMultFor(actor.ip)) ? await store.kvIncr(`wb:rl:create:${actor.ip}`, 3600000) : 0;
   if (n > 30) throw new HttpError(429, "too_many_rooms", "room creation limit: 30 per hour per IP", { retryMs: 600000 });
 
   let w = 32, h = 32;
@@ -334,6 +335,7 @@ export async function act(roomId: string, actor: Actor, input: ActInput, key: st
       }
     };
     const hexes = collectHexes(drawOps);
+    const ipMult = await ipMultFor(actor.ip);
     let done = false;
     for (let attempt = 0; attempt < 6 && !done; attempt++) {
       const snap = await store.snapshot(meta.id, n);
@@ -388,13 +390,13 @@ export async function act(roomId: string, actor: Actor, input: ActInput, key: st
       const res = await store.commit(meta.id, {
         n, changes: useFull ? undefined : changes, full, event: stored, nonce: nonce ? (commitIdx === 0 ? nonce : `${nonce}.${commitIdx}`) : undefined,
         cost, burst: meta.burst, refillPerSec: meta.refillPerSec, allowDebt: meta.mode !== "place",
-        bucket: actor.name, ipBucket: actor.ip, expectSeq: cas ? snap.seq : undefined,
+        bucket: actor.name, ipBucket: actor.ip, ipMult: ipMult, expectSeq: cas ? snap.seq : undefined,
       });
       if (res.status === "conflict") { await new Promise((ok) => setTimeout(ok, 5 + Math.random() * 20 * (attempt + 1))); continue; }
       commitIdx++;
       if (res.status === "dup") return { ok: true, duplicate: true, seq: res.seq, changed: 0, results: [{ op: "draw", duplicate: true }] };
       if (res.status === "limited") {
-        const mult = Math.max(1, Number(process.env.WB_IP_MULT ?? 8));
+        const mult = ipMult;
         const why = res.bucket === "ip"
           ? `your NETWORK's shared pixel budget is empty: every name on your IP shares ${mult}x one player's budget (${meta.burst * mult} px, refill ${Math.round(meta.refillPerSec * mult)} px/s). Other agents on your machine are drawing too`
           : `YOUR pixel budget is empty (${meta.burst} px, refill ${Math.round(meta.refillPerSec * 100) / 100} px/s per name)`;
@@ -430,9 +432,10 @@ export async function act(roomId: string, actor: Actor, input: ActInput, key: st
       await slowmode(meta, actor, "chat", cfg.chatSlowSec[actor.kind]);
       const burst = await store.kvIncr(`wb:{${meta.id}}:chat:${actor.name}`, 10000);
       if (burst > 15) throw new HttpError(429, "chat_flood", "max 15 chat messages per 10 s", { retryMs: 3000 });
-      const ipBurst = await store.kvIncr(`wb:{${meta.id}}:chatip:${actor.ip}`, 10000);
-      const ipMax = 15 * Math.max(1, Number(process.env.WB_IP_MULT ?? 8));
-      if (ipBurst > ipMax) throw new HttpError(429, "chat_flood", `too many chat messages from your network (${ipMax} per 10 s)`, { retryMs: 3000 });
+      const chatMult = await ipMultFor(actor.ip);
+      const ipBurst = chatMult ? await store.kvIncr(`wb:{${meta.id}}:chatip:${actor.ip}`, 10000) : 0;
+      const ipMax = 15 * chatMult;
+      if (chatMult && ipBurst > ipMax) throw new HttpError(429, "chat_flood", `too many chat messages from your network (${ipMax} per 10 s)`, { retryMs: 3000 });
       // in a running round, a chat line that hits or nearly hits the word is
       // treated as a private guess, so it never leaks the answer to the room
       const g = meta.mode === "guess" ? await checkGuess(meta, actor, textIn, true) : null;

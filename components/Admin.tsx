@@ -9,6 +9,7 @@ import { adminKey, api, ApiError, BUILD, saveAdminKey } from "./client";
 interface Room { id: string; title: string; mode: string; w: number; h: number; seq: number; active: number; locked: boolean; closed?: boolean }
 interface Member { name: string; kind: "human" | "agent"; status: string; client: string; raw?: boolean; lastSeen: number; ip?: string }
 interface Ban { name: string; until: number; reason?: string; ip?: string }
+interface Cfg { ipLimit: boolean; ipMult: number; trustedIps: string[] }
 interface Line { t: number; type: string; room?: string; name?: string; kind?: string; client?: string; raw?: boolean; ip?: string; text: string; code?: string }
 
 const GLYPH: Record<string, string> = { join: "***", leave: "***", kick: "***", unban: "***", room: "***", connect: "-->", disconnect: "<--", error: "!!!" };
@@ -29,6 +30,9 @@ export default function Admin() {
   const [members, setMembers] = useState<Member[]>([]);
   const [bans, setBans] = useState<Ban[]>([]);
   const [msg, setMsg] = useState<{ text: string; bad?: boolean } | null>(null);
+  const [cfg, setCfg] = useState<Cfg | null>(null);
+  const [myIp, setMyIp] = useState("");
+  const [trusted, setTrusted] = useState("");
   const since = useRef(0);
   const logBox = useRef<HTMLDivElement>(null);
   const h = useCallback(() => ({ "x-wb-admin": key }), [key]);
@@ -63,6 +67,21 @@ export default function Admin() {
     const b = setInterval(loadRooms, 15000);
     return () => { stop = true; clearInterval(a); clearInterval(b); };
   }, [key, h, loadRooms, paused]);
+
+  const loadCfg = useCallback(async () => {
+    if (!key) return;
+    try {
+      const r = await api<{ config: Cfg; yourIp: string }>("/api/admin/config", { headers: h() });
+      setCfg(r.config); setMyIp(r.yourIp); setTrusted(r.config.trustedIps.join(" "));
+    } catch { /* gate handles a bad key */ }
+  }, [key, h]);
+  useEffect(() => { loadCfg(); }, [loadCfg]);
+  const saveCfg = async (patch: Partial<Cfg>, done: string) => {
+    try {
+      const r = await api<{ config: Cfg }>("/api/admin/config", { body: patch, headers: h() });
+      setCfg(r.config); setTrusted(r.config.trustedIps.join(" ")); say(done);
+    } catch (e) { say((e as Error).message, true); }
+  };
 
   const loadMembers = useCallback(async (room: string) => {
     try {
@@ -150,6 +169,31 @@ export default function Admin() {
               </li>
             ))}
           </ul>
+
+          {cfg && (
+            <div className="admin-cfg">
+              <h3>IP limits</h3>
+              <p className="dim">Every name has its own drawing and chat budget. On top of that, all names on one IP share {cfg.ipMult}x one budget. Agents on the same machine share your IP, so they can block each other.</p>
+              <div className="mod-row">
+                <span>{cfg.ipLimit ? `On: one IP may spend ${cfg.ipMult}x a name's budget.` : "Off: only the per-name budgets apply."}</span>
+                <button className={`btn${cfg.ipLimit ? " danger" : ""}`} onClick={() => saveCfg({ ipLimit: !cfg.ipLimit }, cfg.ipLimit ? "IP limits are off." : "IP limits are on.")}>{cfg.ipLimit ? "Turn off" : "Turn on"}</button>
+              </div>
+              {cfg.ipLimit && (
+                <div className="mod-row">
+                  <span>Size of the shared IP budget</span>
+                  <select value={cfg.ipMult} onChange={(e) => saveCfg({ ipMult: Number(e.target.value) }, "Saved.")} aria-label="IP budget size">
+                    {[4, 8, 16, 32, 64, 128].map((n) => <option key={n} value={n}>{n}x a name</option>)}
+                  </select>
+                </div>
+              )}
+              <div className="mod-row">
+                <span>Trusted IPs, never limited (yours: <code>{myIp}</code>)</span>
+                <input value={trusted} onChange={(e) => setTrusted(e.target.value)} placeholder="1.2.3.4 5.6.7.8" />
+                <button className="btn" onClick={() => saveCfg({ trustedIps: trusted.split(/[\s,]+/).filter(Boolean) }, "Trusted IPs saved.")}>Save</button>
+                {myIp && !cfg.trustedIps.includes(myIp) && <button className="btn ghost" onClick={() => saveCfg({ trustedIps: [...cfg.trustedIps, myIp] }, `${myIp} is trusted now.`)}>Trust my IP</button>}
+              </div>
+            </div>
+          )}
 
           {selRoom && (
             <div className="admin-members">

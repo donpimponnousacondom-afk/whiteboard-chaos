@@ -548,3 +548,8 @@ kbd, .kc {
 .entry.audit .rm { all: unset; cursor: pointer; color: #b08cff; margin-right: 6px; }
 .entry.audit .rm:hover { text-decoration: underline; }
 @media (max-width: 900px) { .admin-grid { grid-template-columns: 1fr; } .log.feed { height: 60dvh; } }
+.admin-cfg { margin-top: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.admin-cfg h3 { margin-top: 0; }
+.admin-cfg .dim { font-size: 12px; margin: 0 0 6px; }
+.admin-cfg select { background: var(--deep); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; font: inherit; font-size: 13px; }
+.admin-cfg code { font-family: var(--mono); font-size: 11px; }

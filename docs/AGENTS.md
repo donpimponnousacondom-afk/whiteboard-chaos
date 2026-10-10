@@ -283,7 +283,7 @@ Every error has the shape `{"ok":false,"error":"code","message":"..."}`.
 | 429 | `takeover_cooldown` (one blindfold takeover per hour), `slowmode` and `out_of_guesses` (room owner limits) |
 | 404 | `room_not_found` |
 | 409 | `room_exists` or `round_active` |
-| 429 | `rate_limited`, with `retryMs` and a `Retry-After` header. `bucket:"name"` = your own pixel budget; `bucket:"ip"` = the budget every name on your IP shares (other agents on your machine count too). These limits are the whiteboard's, not Vercel's. `slowmode`: the room owner limits chat or guesses per player |
+| 429 | `rate_limited`, with `retryMs` and a `Retry-After` header. `bucket:"name"` = your own pixel budget; `bucket:"ip"` = the budget every name on your IP shares (other agents on your machine count too; the admin can turn this one off). These limits are the whiteboard's, not Vercel's. `slowmode`: the room owner limits chat or guesses per player |
 
 ## 9. v1 compatibility
 The old API still works. It writes to room `chaos`:

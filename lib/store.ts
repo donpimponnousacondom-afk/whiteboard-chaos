@@ -18,8 +18,6 @@ import type { CommitReq, CommitResult, RoomMeta, Snapshot, WbEvent } from "./typ
 // so big boards keep fewer events (~16 MB worst case per room). Clients that
 // fall further behind get a snapshot instead.
 export const streamMaxlen = (n: number) => Math.max(300, Math.min(20000, Math.floor(16_000_000 / n)));
-// An IP may spend this many times one name's budget (many agents behind one NAT).
-const IP_MULT = Math.max(1, Number(process.env.WB_IP_MULT ?? 8));
 const NONCE_TTL_S = 7 * 86400; // same 7 days replay window as v1
 
 export interface PresenceEntry {
@@ -117,8 +115,10 @@ if cost > 0 then
   local w1, w2
   t1, w1 = check(KEYS[5], burst, rate)
   if not t1 then return {2, w1, 1} end
-  t2, w2 = check(KEYS[6], burst * mult, rate * mult)
-  if not t2 then return {2, w2, 2} end
+  if mult > 0 then
+    t2, w2 = check(KEYS[6], burst * mult, rate * mult)
+    if not t2 then return {2, w2, 2} end
+  end
 end
 local cur = tonumber(redis.call('GET', KEYS[2]) or '0')
 if ARGV[13] ~= '' and tonumber(ARGV[13]) ~= cur then return {3, cur} end
@@ -131,8 +131,10 @@ local seq = cur + 1
 if cost > 0 then
   redis.call('HSET', KEYS[5], 't', tostring(t1 - cost), 'ts', tostring(now))
   redis.call('PEXPIRE', KEYS[5], 3600000)
-  redis.call('HSET', KEYS[6], 't', tostring(t2 - cost), 'ts', tostring(now))
-  redis.call('PEXPIRE', KEYS[6], 3600000)
+  if t2 then
+    redis.call('HSET', KEYS[6], 't', tostring(t2 - cost), 'ts', tostring(now))
+    redis.call('PEXPIRE', KEYS[6], 3600000)
+  end
 end
 local n = tonumber(ARGV[1])
 if redis.call('EXISTS', KEYS[1]) == 0 then
@@ -293,7 +295,7 @@ class RedisStore implements Store {
       K.nonce(room, q.nonce || "-"), K.bucket(room, q.bucket), K.bucket(room, "ip:" + (q.ipBucket || "-")),
       q.n, mode, data, JSON.stringify(q.event), streamMaxlen(q.n), NONCE_TTL_S,
       q.nonce ? "1" : "0", q.cost, q.burst, q.refillPerSec / 1000, Date.now(), q.allowDebt ? "1" : "0",
-      q.expectSeq === undefined ? "" : String(q.expectSeq), IP_MULT,
+      q.expectSeq === undefined ? "" : String(q.expectSeq), q.ipBucket ? q.ipMult ?? 0 : 0,
     );
     if (code === 1) return { status: "dup", seq: Number(val) };
     if (code === 2) return { status: "limited", retryMs: Number(val), bucket: which === 2 ? "ip" : "name" };
@@ -487,10 +489,11 @@ class MemoryStore implements Store {
       const k1 = `${room}:${q.bucket}`, k2 = `${room}:ip:${q.ipBucket || "-"}`;
       const a = check(k1, q.burst, rate);
       if (!a.ok) return { status: "limited", retryMs: a.wait, bucket: "name" };
-      const b = check(k2, q.burst * IP_MULT, rate * IP_MULT);
-      if (!b.ok) return { status: "limited", retryMs: b.wait, bucket: "ip" };
+      const mult = q.ipBucket ? q.ipMult ?? 0 : 0;
+      const b = mult > 0 ? check(k2, q.burst * mult, rate * mult) : null;
+      if (b && !b.ok) return { status: "limited", retryMs: b.wait, bucket: "ip" };
       this.buckets.set(k1, { t: a.tokens - q.cost, ts: now });
-      this.buckets.set(k2, { t: b.tokens - q.cost, ts: now });
+      if (b) this.buckets.set(k2, { t: b.tokens - q.cost, ts: now });
     }
     if (q.expectSeq !== undefined && q.expectSeq !== r.seq) return { status: "conflict", seq: r.seq };
     if (q.full !== undefined) r.board = q.full.split("");
