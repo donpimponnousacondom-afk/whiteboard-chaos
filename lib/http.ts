@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { audit, fold } from "./audit";
 import { BUILD } from "./build";
+import { getStore } from "./store";
 import { parseClient } from "./clientInfo";
 import { CLI_LATEST, cliMin, cliVersionOf, cmpVersion } from "./cliVersion";
 
@@ -105,9 +106,15 @@ async function auditError(req: NextRequest, e: unknown) {
   const client = parseClient(req.headers.get("user-agent"));
   const f = fold(`err:${ip}:${name}:${code}:${url.pathname}`, 2000);
   if (!f.emit) return;
+  // Across instances too: one stale tab or a looping agent must not fill the
+  // log. The same error from the same name on the same path is logged once
+  // per window (60 s for rate limits, 10 min for everything else).
+  const windowMs = status === 429 ? 60000 : 600000;
+  const seen = await getStore().kvIncr(`wb:auditfold:${ip}:${name}:${code}:${url.pathname}`, windowMs).catch(() => 1);
+  if (seen > 1) return;
   const msg = e instanceof Error ? e.message : String(e);
   await audit({
     type: "error", room, name, client: client.label, raw: client.raw, ip, code,
-    text: `${req.method} ${url.pathname.replace(/^\/api/, "")} -> ${status} ${code}${f.n > 1 ? ` (x${f.n})` : ""}: ${msg.slice(0, 160)}`,
+    text: `${req.method} ${url.pathname.replace(/^\/api/, "")} -> ${status} ${code}: ${msg.slice(0, 160)} (repeats in the next ${windowMs / 60000} min are not logged)`,
   });
 }
