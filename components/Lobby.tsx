@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { adminKey, api, BUILD, saveOwnerKey, saveSession } from "./client";
+import { useAwake } from "./useAwake";
 import WordBag, { bagToGame, DEFAULT_BAG, type BagValue } from "./WordBag";
 
 interface RoomRow { id: string; title: string; theme: string; w: number; h: number; mode: string; seq: number; active: number; locked: boolean; closed?: boolean }
@@ -25,6 +26,7 @@ function ago(t: number) {
 }
 
 export default function Lobby() {
+  const awake = useAwake();
   const router = useRouter();
   const [rooms, setRooms] = useState<RoomRow[] | null>(null);
   const [form, setForm] = useState({ id: "", title: "", theme: "", size: "64x64", mode: "free", key: "" });
@@ -37,9 +39,10 @@ export default function Lobby() {
     setOrigin(window.location.origin);
     const load = () => { const a = adminKey(); return api<{ rooms: RoomRow[] }>("/api/rooms", a ? { headers: { "x-wb-admin": a } } : {}).then((r) => setRooms(r.rooms)).catch(() => setRooms([])); };
     load();
-    const t = setInterval(load, 8000);
+    if (!awake) return;
+    const t = setInterval(load, 30000);
     return () => clearInterval(t);
-  }, []);
+  }, [awake]);
 
   const lobby = rooms?.find((r) => r.id === "lobby");
 

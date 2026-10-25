@@ -9,6 +9,7 @@ import GamePanel, { type GameState } from "./GamePanel";
 import InviteAgent from "./InviteAgent";
 import SettingsModal from "./SettingsModal";
 import { KeysHelp, ToolWheel, type WheelPick } from "./Keys";
+import { useAwake } from "./useAwake";
 import { ICON_FIT, ICON_MIRROR, ICON_UNDO, TOOLS, toolByKey, type Tool } from "./tools";
 
 interface Meta {
@@ -68,6 +69,7 @@ export default function Room({ roomId }: { roomId: string }) {
   const [feedback, setFeedback] = useState<{ text: string; tone: "good" | "close" | "bad" } | null>(null);
   const [wheel, setWheel] = useState<{ x: number; y: number } | null>(null);
   const [outdated, setOutdated] = useState(false);
+  const awake = useAwake();
   const [kicked, setKicked] = useState<string | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
   const [debug, setDebug] = useState(false);
@@ -375,8 +377,10 @@ export default function Room({ roomId }: { roomId: string }) {
     }
   }, [addLog, loadBoard, refreshGame, refreshMembers, refreshPresence, resync, roomId, setPal]);
 
-  // initial load + SSE
+  // initial load + live stream. Asleep (hidden or idle tab): no stream, no
+  // polls; waking up reloads the room and reconnects from the last seq.
   useEffect(() => {
+    if (!awake) return;
     let es: EventSource | null = null;
     let cancelled = false;
     let wsTimer: ReturnType<typeof setTimeout> | null = null;
@@ -466,7 +470,7 @@ export default function Room({ roomId }: { roomId: string }) {
       }
     })();
     return () => { cancelled = true; es?.close(); if (wsTimer) clearTimeout(wsTimer); const w = wsRef.current; wsRef.current = null; w?.close(); pendingWs?.close(); };
-  }, [roomId, addLog, fit, handleEvent, loadBoard, setPal, refreshMembers]);
+  }, [roomId, addLog, fit, handleEvent, loadBoard, setPal, refreshMembers, awake]);
 
   // who may see the debug feed; stale page; members poll
   useEffect(() => { setPowers({ admin: !!adminKey(), owner: !!ownerKeyFor(roomId) }); }, [roomId, settingsOpen]);
@@ -475,11 +479,11 @@ export default function Room({ roomId }: { roomId: string }) {
     window.addEventListener(OUTDATED_EVENT, on);
     return () => window.removeEventListener(OUTDATED_EVENT, on);
   }, []);
-  useEffect(() => { const t = setInterval(refreshMembers, 10000); return () => clearInterval(t); }, [refreshMembers]);
+  useEffect(() => { if (!awake) return; const t = setInterval(refreshMembers, 60000); return () => clearInterval(t); }, [refreshMembers, awake]);
 
   // debug feed: the room's audit log (admin: with IPs; owner: without), polled while on
   useEffect(() => {
-    if (!debug) return;
+    if (!debug || !awake) return;
     let since = 0;
     let stop = false;
     const pull = async () => {
@@ -495,19 +499,21 @@ export default function Room({ roomId }: { roomId: string }) {
     };
     setAuditLog([]);
     pull();
-    const t = setInterval(pull, 2000);
+    const t = setInterval(pull, 4000);
     return () => { stop = true; clearInterval(t); };
-  }, [debug, roomId, flash]);
+  }, [debug, roomId, flash, awake]);
 
-  // heartbeat + presence poll + clock
+  // clock (local, free)
+  useEffect(() => { const c = setInterval(() => setNow(Date.now()), 500); return () => clearInterval(c); }, []);
+  // heartbeat: one request every 25 s (presence lists keep 30 s), and it
+  // doubles as the presence refresh. Presence changes are also pushed live.
   useEffect(() => {
+    if (!awake) return;
     const beat = () => api(`/api/rooms/${roomId}/presence`, { body: {} }).then(refreshPresence).catch(() => {});
     beat();
-    const a = setInterval(beat, 15000);
-    const b = setInterval(refreshPresence, 8000);
-    const c = setInterval(() => setNow(Date.now()), 500);
-    return () => { clearInterval(a); clearInterval(b); clearInterval(c); };
-  }, [roomId, refreshPresence]);
+    const a = setInterval(beat, 25000);
+    return () => clearInterval(a);
+  }, [roomId, refreshPresence, awake]);
 
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 860px)");
@@ -541,10 +547,10 @@ export default function Room({ roomId }: { roomId: string }) {
 
   // life autoplay
   useEffect(() => {
-    if (!lifeAuto) return;
+    if (!lifeAuto || !awake) return;
     const t = setInterval(() => { api(`/api/rooms/${roomId}/ops`, { body: { ops: [{ op: "life" }] } }).catch(() => {}); }, 450);
     return () => clearInterval(t);
-  }, [lifeAuto, roomId]);
+  }, [lifeAuto, roomId, awake]);
 
   // ---------------------------------------------------------------- writes
   const flush = useCallback(async () => {
@@ -1082,6 +1088,11 @@ export default function Room({ roomId }: { roomId: string }) {
           <button className="btn hot small" onClick={() => location.reload()}>Reload now</button>
         </div>
       )}
+      {!awake && (
+        <div className="banner sleep" role="status">
+          <span>Paused: this tab was hidden or idle, so it stopped using the server. Move the mouse or press a key to catch up.</span>
+        </div>
+      )}
       {kicked && (
         <div className="banner bad" role="alert">
           <span>{kicked}</span>
@@ -1095,8 +1106,8 @@ export default function Room({ roomId }: { roomId: string }) {
           {m && <span className={`mode mode-${m.mode}`}>{MODE_TEXT[m.mode]}{m.locked ? ", locked" : ""}</span>}
         </div>
         <div className="room-stats" aria-live="polite">
-          <span className={`dot ${conn}`} title={conn} />
-          <span title="WebSocket when available, otherwise Server-Sent Events + HTTP">{conn === "live" ? `live${transport ? ` (${transport === "ws" ? "websocket" : "sse"})` : ""}` : conn}</span>
+          <span className={`dot ${awake ? conn : "paused"}`} title={awake ? conn : "paused"} />
+          <span title="WebSocket when available, otherwise Server-Sent Events + HTTP. Paused while the tab is hidden or idle.">{!awake ? "paused" : conn === "live" ? `live${transport ? ` (${transport === "ws" ? "websocket" : "sse"})` : ""}` : conn}</span>
           {latency !== null && <span className="num" title="Round trip of your last write">{latency} ms</span>}
           <span className="num" title="Events in this room">seq {seqView}</span>
           <span title="People here"><i className="h">{humans}</i> humans, <i className="a">{agents}</i> agents</span>

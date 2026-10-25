@@ -553,3 +553,5 @@ kbd, .kc {
 .admin-cfg .dim { font-size: 12px; margin: 0 0 6px; }
 .admin-cfg select { background: var(--deep); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; font: inherit; font-size: 13px; }
 .admin-cfg code { font-family: var(--mono); font-size: 11px; }
+.banner.sleep { background: #141c2b; color: var(--agent); }
+.dot.paused { background: var(--agent); opacity: 0.6; }

@@ -5,6 +5,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { adminKey, api, ApiError, BUILD, saveAdminKey } from "./client";
+import { useAwake } from "./useAwake";
 
 interface Room { id: string; title: string; mode: string; w: number; h: number; seq: number; active: number; locked: boolean; closed?: boolean }
 interface Member { name: string; kind: "human" | "agent"; status: string; client: string; raw?: boolean; lastSeen: number; ip?: string }
@@ -17,6 +18,7 @@ const hhmmss = (t: number) => new Date(t).toTimeString().slice(0, 8);
 const ago = (t: number) => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 90 ? `${s} s` : s < 5400 ? `${Math.round(s / 60)} min` : s < 172800 ? `${Math.round(s / 3600)} h` : `${Math.round(s / 86400)} d`; };
 
 export default function Admin() {
+  const awake = useAwake();
   const [key, setKey] = useState("");
   const [ok, setOk] = useState<boolean | null>(null);
   const [draft, setDraft] = useState("");
@@ -63,10 +65,11 @@ export default function Admin() {
     };
     pull();
     loadRooms();
-    const a = setInterval(() => { if (!paused) pull(); }, 2000);
-    const b = setInterval(loadRooms, 15000);
+    if (!awake) return () => { stop = true; };
+    const a = setInterval(() => { if (!paused) pull(); }, 4000);
+    const b = setInterval(loadRooms, 30000);
     return () => { stop = true; clearInterval(a); clearInterval(b); };
-  }, [key, h, loadRooms, paused]);
+  }, [key, h, loadRooms, paused, awake]);
 
   const loadCfg = useCallback(async () => {
     if (!key) return;
@@ -89,7 +92,7 @@ export default function Admin() {
       setMembers(r.members); setBans(r.bans ?? []);
     } catch (e) { say((e as Error).message, true); }
   }, [h]);
-  useEffect(() => { if (!sel) return; loadMembers(sel); const t = setInterval(() => loadMembers(sel), 5000); return () => clearInterval(t); }, [sel, loadMembers]);
+  useEffect(() => { if (!sel || !awake) return; loadMembers(sel); const t = setInterval(() => loadMembers(sel), 10000); return () => clearInterval(t); }, [sel, loadMembers, awake]);
 
   const act = async (room: string, body: Record<string, unknown>, done: string) => {
     try { await api(`/api/admin/rooms/${room}`, { body, headers: h() }); say(done); loadRooms(); if (sel === room) loadMembers(room); }
@@ -147,6 +150,7 @@ export default function Admin() {
         <Link href="/" className="btn small">Lobby</Link>
         <button className="btn ghost small" onClick={() => { saveAdminKey(""); setKey(""); setDraft(""); }}>Lock</button>
         {msg && <span className={`admin-msg${msg.bad ? " bad" : ""}`} role="status">{msg.text}</span>}
+        {!awake && <span className="admin-msg">Paused (tab hidden or idle). Move the mouse to resume.</span>}
       </header>
 
       <div className="admin-grid">
